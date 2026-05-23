@@ -26,10 +26,11 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import TextPart
 from astrbot.core.message.components import Reply, Video
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 
 PLUGIN_ID = "astrbot_plugin_video_vision_helper"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.2.1"
 PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u589e\u5f3a\u591a\u6a21\u6001\u89c6\u9891\u7406\u89e3"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper"
 
@@ -150,6 +151,13 @@ class VideoVisionHelper(Star):
     def _config_section(self, key: str) -> dict[str, Any]:
         value = self._config_get(key, {})
         return value if isinstance(value, dict) else {}
+
+    def _is_debug_enabled(self) -> bool:
+        return self._read_bool(self._config_get("debug_logging", False), False)
+
+    def _debug(self, message: str, *args: Any) -> None:
+        if self._is_debug_enabled():
+            logger.debug("[%s] " + message, PLUGIN_ID, *args)
 
     @staticmethod
     def _read_bool(value: Any, default: bool) -> bool:
@@ -358,6 +366,115 @@ class VideoVisionHelper(Star):
         )
 
     @staticmethod
+    def _describe_video_component(video: Video) -> str:
+        payload: list[str] = []
+        for field_name in ("file", "path", "cover"):
+            value = getattr(video, field_name, None)
+            if isinstance(value, str) and value.strip():
+                payload.append(f"{field_name}={value!r}")
+        return ", ".join(payload) if payload else repr(video)
+
+    @staticmethod
+    def _strip_file_scheme(value: str) -> str:
+        return value[8:] if value.startswith("file:///") else value
+
+    def _collect_video_path_candidates(self, video: Video) -> list[Path]:
+        temp_roots = [
+            Path(get_astrbot_temp_path()),
+            Path(tempfile.gettempdir()),
+        ]
+        candidates: list[Path] = []
+        seen: set[str] = set()
+
+        for field_name in ("path", "file"):
+            raw_value = getattr(video, field_name, None)
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                continue
+            normalized = self._strip_file_scheme(raw_value.strip())
+            lowered = normalized.lower()
+            if lowered.startswith("http://") or lowered.startswith("https://"):
+                continue
+
+            raw_path = Path(normalized)
+            path_variants = [raw_path]
+            if not raw_path.is_absolute():
+                path_variants.append(Path.cwd() / raw_path)
+                for root in temp_roots:
+                    path_variants.append(root / raw_path)
+                if raw_path.name:
+                    for root in temp_roots:
+                        path_variants.append(root / raw_path.name)
+
+            for candidate in path_variants:
+                key = str(candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(candidate)
+
+        return candidates
+
+    async def _resolve_video_component_path(
+        self,
+        video: Video,
+        *,
+        quoted: bool,
+    ) -> Path | None:
+        component_desc = self._describe_video_component(video)
+        candidates = self._collect_video_path_candidates(video)
+        if candidates:
+            self._debug(
+                "trying to resolve %s video component from candidates=%s component=%s",
+                "quoted" if quoted else "direct",
+                [str(candidate) for candidate in candidates],
+                component_desc,
+            )
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                resolved = candidate.resolve()
+                self._debug(
+                    "resolved %s video component via local candidate: %s",
+                    "quoted" if quoted else "direct",
+                    resolved,
+                )
+                return resolved
+
+        try:
+            resolved = Path(await video.convert_to_file_path())
+        except Exception as exc:
+            if quoted:
+                self._debug(
+                    "skipped unresolved quoted video component: %s component=%s",
+                    exc,
+                    component_desc,
+                )
+                return None
+            logger.warning("[%s] failed to resolve video path from event: %s", PLUGIN_ID, exc)
+            self._debug("direct video component details: %s", component_desc)
+            return None
+
+        if resolved.exists() and resolved.is_file():
+            self._debug(
+                "resolved %s video component via convert_to_file_path: %s",
+                "quoted" if quoted else "direct",
+                resolved,
+            )
+            return resolved
+
+        if quoted:
+            self._debug(
+                "convert_to_file_path returned a non-file path for quoted video: %s component=%s",
+                resolved,
+                component_desc,
+            )
+            return None
+
+        logger.warning("[%s] resolved video path is not a file: %s", PLUGIN_ID, resolved)
+        self._debug("direct video component returned non-file path, details: %s", component_desc)
+        return None
+
+    @staticmethod
     def _read_content_part_text(part: Any) -> str | None:
         if isinstance(part, TextPart):
             return part.text
@@ -413,6 +530,7 @@ class VideoVisionHelper(Star):
                 continue
             seen_paths.add(key)
             attachments.append(attachment)
+        self._debug("collected %s video attachment marker(s) from request", len(attachments))
         return attachments
 
     async def _collect_video_attachments_from_event(
@@ -421,13 +539,13 @@ class VideoVisionHelper(Star):
     ) -> list[VideoAttachment]:
         attachments: list[VideoAttachment] = []
         seen_paths: set[str] = set()
+        messages = event.get_messages()
+        self._debug("falling back to event message chain for video resolution, component_count=%s", len(messages))
 
-        for comp in event.get_messages():
+        for comp in messages:
             if isinstance(comp, Video):
-                try:
-                    path = Path(await comp.convert_to_file_path())
-                except Exception as exc:
-                    logger.warning("[%s] failed to resolve video path from event: %s", PLUGIN_ID, exc)
+                path = await self._resolve_video_component_path(comp, quoted=False)
+                if path is None:
                     continue
                 key = str(path)
                 if key not in seen_paths:
@@ -438,17 +556,12 @@ class VideoVisionHelper(Star):
                 continue
 
             if isinstance(comp, Reply) and comp.chain:
+                self._debug("inspecting reply chain for quoted video attachments, component_count=%s", len(comp.chain))
                 for reply_comp in comp.chain:
                     if not isinstance(reply_comp, Video):
                         continue
-                    try:
-                        path = Path(await reply_comp.convert_to_file_path())
-                    except Exception as exc:
-                        logger.warning(
-                            "[%s] failed to resolve quoted video path from event: %s",
-                            PLUGIN_ID,
-                            exc,
-                        )
+                    path = await self._resolve_video_component_path(reply_comp, quoted=True)
+                    if path is None:
                         continue
                     key = str(path)
                     if key not in seen_paths:
@@ -457,6 +570,7 @@ class VideoVisionHelper(Star):
                             VideoAttachment(name=path.name, path=path, quoted=True),
                         )
 
+        self._debug("collected %s video attachment(s) from event fallback", len(attachments))
         return attachments
 
     async def _collect_video_attachments(
@@ -466,7 +580,9 @@ class VideoVisionHelper(Star):
     ) -> list[VideoAttachment]:
         attachments = self._collect_video_attachment_markers(req)
         if attachments:
+            self._debug("using request markers as the video attachment source")
             return attachments
+        self._debug("no video markers were injected by core, falling back to event parsing")
         return await self._collect_video_attachments_from_event(event)
 
     @staticmethod
@@ -571,10 +687,12 @@ class VideoVisionHelper(Star):
         if not providers:
             logger.warning("[%s] AstrBot STT backend requested but no STT provider is available", PLUGIN_ID)
             return None
+        self._debug("available AstrBot STT providers: %s", [self._get_provider_label(provider) for provider in providers])
 
         if policy.astrbot_provider_id:
             for provider in providers:
                 if self._get_provider_id(provider) == policy.astrbot_provider_id:
+                    self._debug("selected AstrBot STT provider by explicit id: %s", self._get_provider_label(provider))
                     return provider
             logger.warning(
                 "[%s] AstrBot STT provider '%s' was not found, falling back to the configured provider",
@@ -584,8 +702,10 @@ class VideoVisionHelper(Star):
 
         provider = self._get_configured_astrbot_stt_provider(event)
         if provider is not None:
+            self._debug("selected AstrBot STT provider from session/default config: %s", self._get_provider_label(provider))
             return provider
 
+        self._debug("falling back to the first available AstrBot STT provider: %s", self._get_provider_label(providers[0]))
         return providers[0]
 
     @staticmethod
@@ -668,11 +788,19 @@ class VideoVisionHelper(Star):
                 if stream_duration > duration_seconds:
                     duration_seconds = stream_duration
 
-        return VideoProbeInfo(
+        probe_info = VideoProbeInfo(
             duration_seconds=max(0.0, duration_seconds),
             has_video_stream=has_video_stream,
             has_audio_stream=has_audio_stream,
         )
+        self._debug(
+            "ffprobe info for %s: duration=%.3f has_video=%s has_audio=%s",
+            video_path,
+            probe_info.duration_seconds,
+            probe_info.has_video_stream,
+            probe_info.has_audio_stream,
+        )
+        return probe_info
 
     @staticmethod
     def _dedupe_timestamps(values: list[float]) -> list[float]:
@@ -831,6 +959,11 @@ class VideoVisionHelper(Star):
             provider = self._select_astrbot_stt_provider(event, policy)
             if provider is None:
                 return None
+            self._debug(
+                "transcribing audio via AstrBot STT provider %s: %s",
+                self._get_provider_label(provider),
+                audio_path,
+            )
             try:
                 transcript = await provider.get_text(audio_url=str(audio_path))
             except Exception as exc:
@@ -854,6 +987,13 @@ class VideoVisionHelper(Star):
             return None
 
         endpoint = self._normalize_endpoint(policy.endpoint)
+        self._debug(
+            "transcribing audio via openai-compatible STT endpoint=%s model=%s language=%s file=%s",
+            endpoint,
+            policy.model,
+            policy.language or "auto",
+            audio_path,
+        )
         headers = {"Authorization": f"Bearer {policy.api_key}"}
         data: dict[str, Any] = {
             "model": policy.model,
@@ -960,6 +1100,7 @@ class VideoVisionHelper(Star):
         if not payload:
             return
         combined = "\n".join(payload).strip()
+        self._debug("injecting %s hint text block(s) into target=%s", len(payload), target)
 
         if target == "system_prompt":
             if combined not in req.system_prompt:
@@ -998,6 +1139,13 @@ class VideoVisionHelper(Star):
         if not probe_info or not probe_info.has_video_stream:
             logger.warning("[%s] file is not a probeable video: %s", PLUGIN_ID, attachment.path)
             return None
+        self._debug(
+            "processing video=%s quoted=%s duration=%.3f has_audio=%s",
+            attachment.path,
+            attachment.quoted,
+            probe_info.duration_seconds,
+            probe_info.has_audio_stream,
+        )
 
         frame_paths: list[Path] = []
         if settings.frame.enabled:
@@ -1005,6 +1153,7 @@ class VideoVisionHelper(Star):
                 probe_info.duration_seconds,
                 settings.frame,
             )
+            self._debug("frame timestamps for %s: %s", attachment.path, timestamps)
             for index, timestamp in enumerate(timestamps):
                 output_path = self._make_temp_path(f"_frame_{index + 1}.jpg")
                 success = await asyncio.to_thread(
@@ -1020,6 +1169,7 @@ class VideoVisionHelper(Star):
                     continue
                 frame_paths.append(output_path)
                 self._track_temp_file(event, output_path)
+            self._debug("extracted %s frame(s) for %s", len(frame_paths), attachment.path)
 
         audio_path: Path | None = None
         transcript: str | None = None
@@ -1037,6 +1187,7 @@ class VideoVisionHelper(Star):
             )
             if extracted_audio:
                 self._track_temp_file(event, candidate_audio_path)
+                self._debug("extracted audio for %s to %s", attachment.path, candidate_audio_path)
                 if wants_attach:
                     audio_path = candidate_audio_path
                 if wants_stt:
@@ -1049,8 +1200,10 @@ class VideoVisionHelper(Star):
                         audio_path = candidate_audio_path
             else:
                 candidate_audio_path.unlink(missing_ok=True)
+                self._debug("audio extraction failed or produced no output for %s", attachment.path)
 
         if not frame_paths and not audio_path and not transcript:
+            self._debug("video %s produced no usable multimodal artifacts", attachment.path)
             return None
 
         return ProcessedVideo(
@@ -1069,11 +1222,21 @@ class VideoVisionHelper(Star):
         if not settings.frame.enabled and settings.audio.mode == "disabled":
             return
 
+        self._debug(
+            "handling llm request with frame_enabled=%s audio_mode=%s stt_backend=%s hint_target=%s",
+            settings.frame.enabled,
+            settings.audio.mode,
+            settings.stt.backend,
+            settings.hint.target,
+        )
+
         attachments = await self._collect_video_attachments(event, req)
         if not attachments:
+            self._debug("no video attachments were collected for this request")
             return
 
         attachments = attachments[: settings.frame.max_videos_per_request]
+        self._debug("processing %s video attachment(s) after request limit", len(attachments))
         processed_results: list[ProcessedVideo] = []
 
         for attachment in attachments:

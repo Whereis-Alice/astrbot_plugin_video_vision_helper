@@ -1,5 +1,12 @@
 # 更新日志
 
+## 0.2.1 - 2026-05-23
+
+- 新增 `debug_logging` 配置开关，支持输出更细的插件级 debug 日志
+- 优化 quoted video 解析逻辑，优先尝试 `path`、`file:///`、已有本地文件和临时目录候选路径
+- 避免在 quoted video 无法解析时重复输出插件 warning，减少和 AstrBot Core 的重复刷屏
+- 新增 quoted video 报错说明与排障文档
+
 ## 0.2.0 - 2026-05-23
 
 - 新增 `stt_policy.backend = astrbot_configured`，可直接复用 AstrBot 已配置的 STT provider
