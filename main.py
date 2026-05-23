@@ -32,7 +32,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 
 PLUGIN_ID = "astrbot_plugin_video_vision_helper"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.3.1"
 PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u589e\u5f3a\u591a\u6a21\u6001\u89c6\u9891\u7406\u89e3"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper"
 
@@ -337,7 +337,7 @@ class VideoVisionHelper(Star):
                 sampling_mode=sampling_mode,
                 max_frames_per_video=self._read_int(
                     frame_conf.get("max_frames_per_video"),
-                    6,
+                    10,
                     minimum=1,
                     maximum=24,
                 ),

@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.3.1 - 2026-05-24
+
+- 将 `frame_policy.max_frames_per_video` 的默认值从 `6` 提升到 `10`
+- 保持抽帧策略与分段逻辑可配置不变，但默认覆盖信息量更充分
+- 更新 README 与插件元数据
+
 ## 0.3.0 - 2026-05-24
 
 - 新增 `segment_policy`，支持长视频分段处理，可按 `head_only` / `uniform` / `head_tail` 选择取段策略

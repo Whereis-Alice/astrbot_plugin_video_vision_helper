@@ -62,7 +62,7 @@
       },
       "max_frames_per_video": {
         "type": "int",
-        "default": 6,
+        "default": 10,
         "description": "每个视频最多抽取的关键帧数"
       },
       "fixed_interval_seconds": {

@@ -1,6 +1,6 @@
 name: astrbot_plugin_video_vision_helper
 display_name: 视频视觉助手
-version: 0.3.0
+version: 0.3.1
 author: Whereis-Alice
 desc: "将视频拆解为关键帧、分段音频与可选转写文本，增强 AstrBot 对视频内容的理解能力"
 short_desc: "视频抽帧、长视频分段与 AstrBot / 自定义 STT 辅助理解"
