@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+import math
 import subprocess
 import tempfile
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -28,20 +29,26 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import TextPart
 from astrbot.core.message.components import Reply, Video
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
-from astrbot.core.utils.io import download_file
 
 
 PLUGIN_ID = "astrbot_plugin_video_vision_helper"
-PLUGIN_VERSION = "0.2.2"
+PLUGIN_VERSION = "0.3.0"
 PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u589e\u5f3a\u591a\u6a21\u6001\u89c6\u9891\u7406\u89e3"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper"
 
 DEFAULT_SUMMARY_TEMPLATE = (
     "[\u7cfb\u7edf\u63d0\u793a] \u672c\u6b21\u7528\u6237\u53d1\u9001\u4e86 {video_count} \u4e2a\u89c6\u9891\uff0c"
-    "\u63d2\u4ef6\u5df2\u62bd\u53d6 {frame_count} \u5f20\u5173\u952e\u5e27{audio_note}{transcript_note}\u3002"
+    "\u63d2\u4ef6\u5df2\u8986\u76d6 {segment_count} \u4e2a\u5206\u6790\u7247\u6bb5\u5e76\u62bd\u53d6 {frame_count} \u5f20\u5173\u952e\u5e27"
+    "{audio_note}{transcript_note}\uff0c\u603b\u5206\u6790\u65f6\u957f\u7ea6 {coverage_seconds:.1f} \u79d2\u3002"
     "\u8bf7\u7efc\u5408\u955c\u5934\u53d8\u5316\u3001\u4eba\u7269\u52a8\u4f5c\u3001\u5b57\u5e55\u548c\u58f0\u97f3\u7ebf\u7d22\u7406\u89e3\u89c6\u9891\u5185\u5bb9\u3002"
 )
-DEFAULT_TRANSCRIPT_TEMPLATE = "[\u89c6\u9891\u97f3\u9891\u8f6c\u5199][{video_name}] {transcript}"
+DEFAULT_VIDEO_TEMPLATE = (
+    "[\u89c6\u9891\u5206\u6790][{video_name}] \u8986\u76d6 {segment_count} \u4e2a\u7247\u6bb5\uff0c"
+    "\u62bd\u53d6 {frame_count} \u5f20\u5173\u952e\u5e27{audio_note}{transcript_note}\uff0c"
+    "\u5206\u6790\u65f6\u957f\u7ea6 {coverage_seconds:.1f} \u79d2\u3002"
+)
+DEFAULT_TRANSCRIPT_TEMPLATE = "[\u89c6\u9891\u97f3\u9891\u8f6c\u5199][{video_name}] \u5171 {segment_count} \u4e2a\u7247\u6bb5\uff1a\n{transcript}"
+DEFAULT_TRANSCRIPT_SEGMENT_TEMPLATE = "- {segment_label} ({start_seconds:.1f}s-{end_seconds:.1f}s): {transcript}"
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,15 @@ class FramePolicy:
 
 
 @dataclass(frozen=True)
+class SegmentPolicy:
+    enabled: bool
+    selection_mode: str
+    segment_duration_seconds: int
+    max_segments_per_video: int
+    min_video_duration_seconds: int
+
+
+@dataclass(frozen=True)
 class AudioPolicy:
     mode: str
     sample_rate: int
@@ -83,6 +99,7 @@ class SttPolicy:
     temperature: float
     timeout_seconds: int
     max_transcript_chars: int
+    max_total_transcript_chars: int
 
 
 @dataclass(frozen=True)
@@ -91,7 +108,21 @@ class HintPolicy:
     target: str
     remove_raw_video_marker_after_processing: bool
     summary_template: str
+    video_template: str
     transcript_template: str
+    transcript_segment_template: str
+
+
+@dataclass(frozen=True)
+class DownloadPolicy:
+    quoted_video_download_enabled: bool
+    max_download_size_mb: float
+    timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class RuntimePolicy:
+    max_processing_seconds_per_video: int
 
 
 @dataclass(frozen=True)
@@ -99,9 +130,12 @@ class PluginSettings:
     enabled: bool
     ffmpeg: FFmpegPolicy
     frame: FramePolicy
+    segment: SegmentPolicy
     audio: AudioPolicy
     stt: SttPolicy
     hint: HintPolicy
+    download: DownloadPolicy
+    runtime: RuntimePolicy
 
 
 @dataclass(frozen=True)
@@ -120,11 +154,33 @@ class VideoProbeInfo:
 
 
 @dataclass(frozen=True)
+class VideoSegment:
+    index: int
+    start_seconds: float
+    duration_seconds: float
+    label: str
+
+    @property
+    def end_seconds(self) -> float:
+        return self.start_seconds + self.duration_seconds
+
+
+@dataclass(frozen=True)
+class TranscriptChunk:
+    segment_label: str
+    start_seconds: float
+    end_seconds: float
+    text: str
+
+
+@dataclass(frozen=True)
 class ProcessedVideo:
     attachment: VideoAttachment
     frame_paths: list[Path]
-    audio_path: Path | None
-    transcript: str | None
+    audio_paths: list[Path]
+    transcript_chunks: list[TranscriptChunk]
+    segment_count: int
+    coverage_seconds: float
 
 
 @register(PLUGIN_ID, "Whereis-Alice", PLUGIN_DESC, PLUGIN_VERSION, PLUGIN_REPO)
@@ -218,13 +274,23 @@ class VideoVisionHelper(Star):
     def _load_settings(self) -> PluginSettings:
         ffmpeg_conf = self._config_section("ffmpeg_policy")
         frame_conf = self._config_section("frame_policy")
+        segment_conf = self._config_section("segment_policy")
         audio_conf = self._config_section("audio_policy")
         stt_conf = self._config_section("stt_policy")
         hint_conf = self._config_section("hint_policy")
+        download_conf = self._config_section("download_policy")
+        runtime_conf = self._config_section("runtime_policy")
 
         sampling_mode = self._read_str(frame_conf.get("sampling_mode"), "uniform")
-        if sampling_mode not in {"uniform", "fixed_interval"}:
+        if sampling_mode not in {"uniform", "fixed_interval", "head_tail"}:
             sampling_mode = "uniform"
+
+        segment_selection_mode = self._read_str(
+            segment_conf.get("selection_mode"),
+            "uniform",
+        )
+        if segment_selection_mode not in {"head_only", "uniform", "head_tail"}:
+            segment_selection_mode = "uniform"
 
         audio_mode = self._read_str(audio_conf.get("mode"), "attach")
         if audio_mode not in {"disabled", "attach", "stt", "attach_and_stt"}:
@@ -300,6 +366,28 @@ class VideoVisionHelper(Star):
                     maximum=60 * 60,
                 ),
             ),
+            segment=SegmentPolicy(
+                enabled=self._read_bool(segment_conf.get("enabled"), False),
+                selection_mode=segment_selection_mode,
+                segment_duration_seconds=self._read_int(
+                    segment_conf.get("segment_duration_seconds"),
+                    30,
+                    minimum=5,
+                    maximum=60 * 30,
+                ),
+                max_segments_per_video=self._read_int(
+                    segment_conf.get("max_segments_per_video"),
+                    4,
+                    minimum=1,
+                    maximum=24,
+                ),
+                min_video_duration_seconds=self._read_int(
+                    segment_conf.get("min_video_duration_seconds"),
+                    45,
+                    minimum=5,
+                    maximum=60 * 60,
+                ),
+            ),
             audio=AudioPolicy(
                 mode=audio_mode,
                 sample_rate=self._read_int(
@@ -348,6 +436,12 @@ class VideoVisionHelper(Star):
                     minimum=64,
                     maximum=20000,
                 ),
+                max_total_transcript_chars=self._read_int(
+                    stt_conf.get("max_total_transcript_chars"),
+                    2400,
+                    minimum=128,
+                    maximum=50000,
+                ),
             ),
             hint=HintPolicy(
                 enabled=self._read_bool(hint_conf.get("enabled"), True),
@@ -360,9 +454,43 @@ class VideoVisionHelper(Star):
                     hint_conf.get("summary_template"),
                     DEFAULT_SUMMARY_TEMPLATE,
                 ),
+                video_template=self._read_str(
+                    hint_conf.get("video_template"),
+                    DEFAULT_VIDEO_TEMPLATE,
+                ),
                 transcript_template=self._read_str(
                     hint_conf.get("transcript_template"),
                     DEFAULT_TRANSCRIPT_TEMPLATE,
+                ),
+                transcript_segment_template=self._read_str(
+                    hint_conf.get("transcript_segment_template"),
+                    DEFAULT_TRANSCRIPT_SEGMENT_TEMPLATE,
+                ),
+            ),
+            download=DownloadPolicy(
+                quoted_video_download_enabled=self._read_bool(
+                    download_conf.get("quoted_video_download_enabled"),
+                    True,
+                ),
+                max_download_size_mb=self._read_float(
+                    download_conf.get("max_download_size_mb"),
+                    64.0,
+                    minimum=0.0,
+                    maximum=4096.0,
+                ),
+                timeout_seconds=self._read_int(
+                    download_conf.get("timeout_seconds"),
+                    120,
+                    minimum=5,
+                    maximum=3600,
+                ),
+            ),
+            runtime=RuntimePolicy(
+                max_processing_seconds_per_video=self._read_int(
+                    runtime_conf.get("max_processing_seconds_per_video"),
+                    180,
+                    minimum=0,
+                    maximum=60 * 60,
                 ),
             ),
         )
@@ -496,13 +624,53 @@ class VideoVisionHelper(Star):
         event: AstrMessageEvent,
         url: str,
         suggested_name: str,
+        policy: DownloadPolicy,
     ) -> Path | None:
+        if not policy.quoted_video_download_enabled:
+            self._debug("quoted video remote download is disabled, skipping url=%s", url)
+            return None
+
         parsed = urlparse(url)
         suffix = Path(parsed.path).suffix or Path(suggested_name).suffix or ".mp4"
         output_path = self._make_temp_path(suffix)
         self._debug("downloading quoted video from url=%s to path=%s", url, output_path)
+        max_bytes = int(policy.max_download_size_mb * 1024 * 1024) if policy.max_download_size_mb > 0 else 0
         try:
-            await download_file(url, str(output_path))
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=httpx.Timeout(float(policy.timeout_seconds)),
+            ) as client:
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+
+                    raw_content_length = response.headers.get("content-length", "").strip()
+                    if max_bytes > 0 and raw_content_length.isdigit() and int(raw_content_length) > max_bytes:
+                        logger.warning(
+                            "[%s] skipped quoted video download because content-length exceeds limit: %s > %s bytes (%s)",
+                            PLUGIN_ID,
+                            raw_content_length,
+                            max_bytes,
+                            url,
+                        )
+                        return None
+
+                    downloaded_bytes = 0
+                    with output_path.open("wb") as file_obj:
+                        async for chunk in response.aiter_bytes():
+                            if not chunk:
+                                continue
+                            downloaded_bytes += len(chunk)
+                            if max_bytes > 0 and downloaded_bytes > max_bytes:
+                                logger.warning(
+                                    "[%s] aborted quoted video download because size exceeds limit: %s > %s bytes (%s)",
+                                    PLUGIN_ID,
+                                    downloaded_bytes,
+                                    max_bytes,
+                                    url,
+                                )
+                                output_path.unlink(missing_ok=True)
+                                return None
+                            file_obj.write(chunk)
         except Exception as exc:
             logger.warning("[%s] failed to download quoted video from %s: %s", PLUGIN_ID, url, exc)
             output_path.unlink(missing_ok=True)
@@ -520,6 +688,7 @@ class VideoVisionHelper(Star):
         payload: dict[str, Any],
         *,
         quoted: bool,
+        download_policy: DownloadPolicy,
     ) -> VideoAttachment | None:
         candidates = self._collect_video_path_candidates_from_mapping(payload)
         url = self._read_str(payload.get("url"), "")
@@ -538,7 +707,12 @@ class VideoVisionHelper(Star):
                 return VideoAttachment(name=name or resolved.name, path=resolved, quoted=quoted)
 
         if url.startswith("http://") or url.startswith("https://"):
-            downloaded_path = await self._download_video_from_url(event, url, name)
+            downloaded_path = await self._download_video_from_url(
+                event,
+                url,
+                name,
+                download_policy,
+            )
             if downloaded_path is not None:
                 return VideoAttachment(
                     name=name or downloaded_path.name,
@@ -552,6 +726,7 @@ class VideoVisionHelper(Star):
         self,
         event: AstrMessageEvent,
         seen_paths: set[str],
+        download_policy: DownloadPolicy,
     ) -> list[VideoAttachment]:
         bot = getattr(event, "bot", None)
         raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
@@ -584,6 +759,7 @@ class VideoVisionHelper(Star):
                     event,
                     payload,
                     quoted=True,
+                    download_policy=download_policy,
                 )
                 if attachment is None:
                     continue
@@ -722,6 +898,7 @@ class VideoVisionHelper(Star):
     async def _collect_video_attachments_from_event(
         self,
         event: AstrMessageEvent,
+        settings: PluginSettings,
     ) -> list[VideoAttachment]:
         attachments: list[VideoAttachment] = []
         seen_paths: set[str] = set()
@@ -750,8 +927,9 @@ class VideoVisionHelper(Star):
                     if path is None:
                         continue
                     key = str(path)
-                    if key not in seen_paths:
-                        seen_paths.add(key)
+                    if key in seen_paths:
+                        continue
+                    seen_paths.add(key)
                     attachments.append(
                         VideoAttachment(name=path.name, path=path, quoted=True),
                     )
@@ -759,6 +937,7 @@ class VideoVisionHelper(Star):
         aiocqhttp_reply_attachments = await self._collect_aiocqhttp_reply_video_attachments(
             event,
             seen_paths,
+            settings.download,
         )
         attachments.extend(aiocqhttp_reply_attachments)
         self._debug("collected %s video attachment(s) from event fallback", len(attachments))
@@ -768,13 +947,14 @@ class VideoVisionHelper(Star):
         self,
         event: AstrMessageEvent,
         req: ProviderRequest,
+        settings: PluginSettings,
     ) -> list[VideoAttachment]:
         attachments = self._collect_video_attachment_markers(req)
         if attachments:
             self._debug("using request markers as the video attachment source")
             return attachments
         self._debug("no video markers were injected by core, falling back to event parsing")
-        return await self._collect_video_attachments_from_event(event)
+        return await self._collect_video_attachments_from_event(event, settings)
 
     @staticmethod
     def _track_temp_file(event: AstrMessageEvent, path: Path) -> None:
@@ -911,6 +1091,232 @@ class VideoVisionHelper(Star):
             normalized = normalized[: policy.max_transcript_chars].rstrip() + "..."
         return normalized
 
+    @staticmethod
+    def _truncate_text(text: str, max_chars: int) -> str:
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        if max_chars <= 3:
+            return text[:max_chars]
+        return text[: max_chars - 3].rstrip() + "..."
+
+    def _limit_transcript_chunks(
+        self,
+        chunks: list[TranscriptChunk],
+        max_total_chars: int,
+    ) -> list[TranscriptChunk]:
+        if max_total_chars <= 0:
+            return chunks
+
+        result: list[TranscriptChunk] = []
+        remaining_chars = max_total_chars
+        for chunk in chunks:
+            if remaining_chars <= 0:
+                break
+            text = self._truncate_text(chunk.text, remaining_chars)
+            if not text.strip():
+                break
+            result.append(replace(chunk, text=text))
+            remaining_chars -= len(text)
+        return result
+
+    @staticmethod
+    def _remaining_processing_seconds(
+        started_at: float,
+        policy: RuntimePolicy,
+    ) -> float | None:
+        if policy.max_processing_seconds_per_video <= 0:
+            return None
+        return max(
+            0.0,
+            float(policy.max_processing_seconds_per_video) - (time.monotonic() - started_at),
+        )
+
+    @staticmethod
+    def _resolve_timeout_seconds(
+        configured_seconds: int | float,
+        remaining_seconds: float | None,
+        *,
+        minimum_seconds: float = 1.0,
+    ) -> float:
+        configured = max(float(configured_seconds), minimum_seconds)
+        if remaining_seconds is None:
+            return configured
+        return max(minimum_seconds, min(configured, remaining_seconds))
+
+    def _is_processing_budget_exhausted(
+        self,
+        attachment: VideoAttachment,
+        started_at: float,
+        policy: RuntimePolicy,
+        *,
+        stage: str,
+    ) -> bool:
+        remaining_seconds = self._remaining_processing_seconds(started_at, policy)
+        if remaining_seconds is None or remaining_seconds > 0:
+            return False
+        logger.warning(
+            "[%s] skipped remaining work for %s because processing time limit was reached at stage=%s",
+            PLUGIN_ID,
+            attachment.path,
+            stage,
+        )
+        return True
+
+    @staticmethod
+    def _clamp_timestamp(timestamp_seconds: float, duration_seconds: float) -> float:
+        if duration_seconds <= 0:
+            return 0.0
+        max_timestamp = max(duration_seconds - 0.05, 0.0)
+        return max(0.0, min(timestamp_seconds, max_timestamp))
+
+    def _sample_uniform_positions(
+        self,
+        start_seconds: float,
+        end_seconds: float,
+        count: int,
+    ) -> list[float]:
+        if count <= 0:
+            return []
+        if count == 1 or end_seconds <= start_seconds:
+            return [round(start_seconds, 3)]
+        step = (end_seconds - start_seconds) / float(count - 1)
+        return [round(start_seconds + step * index, 3) for index in range(count)]
+
+    def _fill_uniform_positions(
+        self,
+        existing: list[float],
+        *,
+        target_count: int,
+        max_start: float,
+    ) -> list[float]:
+        if len(existing) >= target_count:
+            return existing[:target_count]
+        needed = target_count - len(existing)
+        candidates = self._sample_uniform_positions(0.0, max_start, needed + len(existing))
+        merged = sorted(self._dedupe_timestamps(existing + candidates))
+        return merged[:target_count]
+
+    def _build_segment_start_positions(
+        self,
+        duration_seconds: float,
+        segment_duration_seconds: float,
+        segment_count: int,
+        selection_mode: str,
+    ) -> list[float]:
+        if segment_count <= 1:
+            return [0.0]
+
+        max_start = max(duration_seconds - segment_duration_seconds, 0.0)
+        if max_start <= 0:
+            return [0.0]
+
+        if selection_mode == "head_only":
+            return self._sample_uniform_positions(0.0, min(max_start, segment_duration_seconds * (segment_count - 1)), segment_count)
+
+        if selection_mode == "head_tail":
+            head_count = int(math.ceil(segment_count / 2))
+            tail_count = segment_count - head_count
+            head_positions = [
+                min(max_start, segment_duration_seconds * index)
+                for index in range(head_count)
+            ]
+            tail_positions = [
+                max(0.0, max_start - segment_duration_seconds * index)
+                for index in range(tail_count)
+            ]
+            merged = sorted(self._dedupe_timestamps(head_positions + tail_positions))
+            return self._fill_uniform_positions(
+                merged,
+                target_count=segment_count,
+                max_start=max_start,
+            )
+
+        return self._sample_uniform_positions(0.0, max_start, segment_count)
+
+    def _build_video_segments(
+        self,
+        duration_seconds: float,
+        coverage_budget_seconds: float,
+        policy: SegmentPolicy,
+    ) -> list[VideoSegment]:
+        total_duration = max(duration_seconds, 0.0)
+        if total_duration <= 0:
+            return [VideoSegment(index=1, start_seconds=0.0, duration_seconds=0.0, label="\u7247\u6bb5 1")]
+
+        coverage_budget = min(total_duration, max(coverage_budget_seconds, 0.0)) or total_duration
+        if (
+            not policy.enabled
+            or total_duration <= float(policy.min_video_duration_seconds)
+            or coverage_budget <= float(policy.segment_duration_seconds)
+            or total_duration <= float(policy.segment_duration_seconds)
+        ):
+            return [
+                VideoSegment(
+                    index=1,
+                    start_seconds=0.0,
+                    duration_seconds=round(min(total_duration, coverage_budget), 3),
+                    label="\u7247\u6bb5 1",
+                ),
+            ]
+
+        segment_duration = min(float(policy.segment_duration_seconds), total_duration)
+        segment_count = min(
+            policy.max_segments_per_video,
+            max(1, int(math.ceil(coverage_budget / max(segment_duration, 0.001)))),
+        )
+        starts = self._build_segment_start_positions(
+            total_duration,
+            segment_duration,
+            segment_count,
+            policy.selection_mode,
+        )
+
+        segments: list[VideoSegment] = []
+        remaining_budget = coverage_budget
+        for index, start_seconds in enumerate(starts, start=1):
+            if remaining_budget <= 0:
+                break
+            actual_duration = min(
+                segment_duration,
+                total_duration - start_seconds,
+                remaining_budget,
+            )
+            if actual_duration <= 0:
+                continue
+            segments.append(
+                VideoSegment(
+                    index=index,
+                    start_seconds=round(start_seconds, 3),
+                    duration_seconds=round(actual_duration, 3),
+                    label=f"\u7247\u6bb5 {index}",
+                ),
+            )
+            remaining_budget -= actual_duration
+
+        return segments or [
+            VideoSegment(
+                index=1,
+                start_seconds=0.0,
+                duration_seconds=round(min(total_duration, coverage_budget), 3),
+                label="\u7247\u6bb5 1",
+            ),
+        ]
+
+    @staticmethod
+    def _segment_key(segment: VideoSegment) -> str:
+        return f"{segment.start_seconds:.3f}-{segment.duration_seconds:.3f}"
+
+    @staticmethod
+    def _distribute_items(total_count: int, bucket_count: int) -> list[int]:
+        if total_count <= 0 or bucket_count <= 0:
+            return []
+        base_count = total_count // bucket_count
+        remainder = total_count % bucket_count
+        return [
+            base_count + (1 if index < remainder else 0)
+            for index in range(bucket_count)
+        ]
+
     def _run_command(
         self,
         command: list[str],
@@ -931,6 +1337,8 @@ class VideoVisionHelper(Star):
         self,
         video_path: Path,
         policy: FFmpegPolicy,
+        *,
+        timeout_seconds: int | None = None,
     ) -> VideoProbeInfo | None:
         command = [
             policy.ffprobe_path,
@@ -945,7 +1353,7 @@ class VideoVisionHelper(Star):
         try:
             result = self._run_command(
                 command,
-                timeout_seconds=policy.command_timeout_seconds,
+                timeout_seconds=timeout_seconds or policy.command_timeout_seconds,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("[%s] ffprobe failed for %s: %s", PLUGIN_ID, video_path, exc)
@@ -1009,24 +1417,64 @@ class VideoVisionHelper(Star):
         self,
         duration_seconds: float,
         policy: FramePolicy,
+        *,
+        frame_count: int | None = None,
     ) -> list[float]:
-        target_duration = min(
-            max(duration_seconds, 0.0),
-            float(policy.max_video_duration_seconds),
-        )
-        if policy.max_frames_per_video <= 1 or target_duration <= 0:
+        target_duration = max(duration_seconds, 0.0)
+        target_count = frame_count if frame_count is not None else policy.max_frames_per_video
+        if target_count <= 1 or target_duration <= 0:
             return [0.0]
 
         if policy.sampling_mode == "fixed_interval":
             timestamps: list[float] = [0.0]
             cursor = policy.fixed_interval_seconds
-            while cursor < target_duration and len(timestamps) < policy.max_frames_per_video:
+            while cursor < target_duration and len(timestamps) < target_count:
                 timestamps.append(cursor)
                 cursor += policy.fixed_interval_seconds
-            return self._dedupe_timestamps(timestamps[: policy.max_frames_per_video])
+            if len(timestamps) < target_count:
+                timestamps.append(self._clamp_timestamp(target_duration, target_duration))
+            return self._dedupe_timestamps(timestamps[:target_count])
 
-        step = target_duration / max(policy.max_frames_per_video, 1)
-        timestamps = [step * index for index in range(policy.max_frames_per_video)]
+        if policy.sampling_mode == "head_tail":
+            end_timestamp = self._clamp_timestamp(target_duration, target_duration)
+            if target_count == 2:
+                return self._dedupe_timestamps([0.0, end_timestamp])
+
+            head_count = target_count // 2
+            tail_count = target_count // 2
+            middle_count = target_count - head_count - tail_count
+            head_window_end = max(target_duration * 0.35, 0.0)
+            tail_window_start = min(max(target_duration * 0.65, 0.0), end_timestamp)
+            if tail_window_start <= head_window_end:
+                return self._decide_frame_timestamps(
+                    target_duration,
+                    FramePolicy(
+                        enabled=policy.enabled,
+                        max_videos_per_request=policy.max_videos_per_request,
+                        sampling_mode="uniform",
+                        max_frames_per_video=policy.max_frames_per_video,
+                        fixed_interval_seconds=policy.fixed_interval_seconds,
+                        max_side=policy.max_side,
+                        jpeg_quality=policy.jpeg_quality,
+                        max_video_duration_seconds=policy.max_video_duration_seconds,
+                    ),
+                    frame_count=target_count,
+                )
+
+            timestamps: list[float] = []
+            if head_count > 0:
+                timestamps.extend(self._sample_uniform_positions(0.0, head_window_end, head_count))
+            if middle_count > 0:
+                timestamps.append(round(target_duration / 2.0, 3))
+            if tail_count > 0:
+                if tail_count == 1:
+                    timestamps.append(end_timestamp)
+                else:
+                    timestamps.extend(self._sample_uniform_positions(tail_window_start, end_timestamp, tail_count))
+            return self._dedupe_timestamps(timestamps)
+
+        step = target_duration / max(target_count - 1, 1)
+        timestamps = [step * index for index in range(target_count)]
         return self._dedupe_timestamps(timestamps)
 
     @staticmethod
@@ -1042,6 +1490,7 @@ class VideoVisionHelper(Star):
         *,
         policy: FramePolicy,
         ffmpeg_policy: FFmpegPolicy,
+        timeout_seconds: int | None = None,
     ) -> bool:
         command = [
             ffmpeg_policy.ffmpeg_path,
@@ -1066,7 +1515,7 @@ class VideoVisionHelper(Star):
         try:
             result = self._run_command(
                 command,
-                timeout_seconds=ffmpeg_policy.command_timeout_seconds,
+                timeout_seconds=timeout_seconds or ffmpeg_policy.command_timeout_seconds,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning(
@@ -1095,8 +1544,11 @@ class VideoVisionHelper(Star):
         video_path: Path,
         output_path: Path,
         *,
+        start_seconds: float = 0.0,
+        duration_seconds: float | None = None,
         policy: AudioPolicy,
         ffmpeg_policy: FFmpegPolicy,
+        timeout_seconds: int | None = None,
     ) -> bool:
         command = [
             ffmpeg_policy.ffmpeg_path,
@@ -1104,6 +1556,8 @@ class VideoVisionHelper(Star):
             "-loglevel",
             "error",
             "-y",
+            "-ss",
+            f"{max(0.0, start_seconds):.3f}",
             "-i",
             str(video_path),
             "-vn",
@@ -1112,7 +1566,7 @@ class VideoVisionHelper(Star):
             "-ar",
             str(policy.sample_rate),
             "-t",
-            str(policy.max_audio_duration_seconds),
+            str(duration_seconds or policy.max_audio_duration_seconds),
             "-f",
             "wav",
             str(output_path),
@@ -1120,7 +1574,7 @@ class VideoVisionHelper(Star):
         try:
             result = self._run_command(
                 command,
-                timeout_seconds=ffmpeg_policy.command_timeout_seconds,
+                timeout_seconds=timeout_seconds or ffmpeg_policy.command_timeout_seconds,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("[%s] ffmpeg audio extraction failed for %s: %s", PLUGIN_ID, video_path, exc)
@@ -1143,6 +1597,8 @@ class VideoVisionHelper(Star):
         event: AstrMessageEvent,
         audio_path: Path,
         policy: SttPolicy,
+        *,
+        timeout_seconds: float | None = None,
     ) -> str | None:
         if policy.backend == "disabled":
             return None
@@ -1196,7 +1652,12 @@ class VideoVisionHelper(Star):
             data["prompt"] = policy.prompt
 
         try:
-            async with httpx.AsyncClient(timeout=policy.timeout_seconds) as client:
+            request_timeout = self._resolve_timeout_seconds(
+                policy.timeout_seconds,
+                timeout_seconds,
+                minimum_seconds=1.0,
+            )
+            async with httpx.AsyncClient(timeout=request_timeout) as client:
                 with audio_path.open("rb") as file_obj:
                     response = await client.post(
                         endpoint,
@@ -1247,6 +1708,8 @@ class VideoVisionHelper(Star):
         *,
         video_count: int,
         frame_count: int,
+        segment_count: int,
+        coverage_seconds: float,
         audio_count: int,
         transcript_count: int,
     ) -> str:
@@ -1255,8 +1718,46 @@ class VideoVisionHelper(Star):
             DEFAULT_SUMMARY_TEMPLATE,
             video_count=video_count,
             frame_count=frame_count,
+            segment_count=segment_count,
+            coverage_seconds=coverage_seconds,
             audio_note=self._build_audio_note(audio_count),
             transcript_note=self._build_transcript_note(transcript_count),
+        )
+
+    def _build_video_text(
+        self,
+        policy: HintPolicy,
+        *,
+        video_name: str,
+        frame_count: int,
+        segment_count: int,
+        coverage_seconds: float,
+        audio_count: int,
+        transcript_count: int,
+    ) -> str:
+        return self._format_template(
+            policy.video_template,
+            DEFAULT_VIDEO_TEMPLATE,
+            video_name=video_name,
+            frame_count=frame_count,
+            segment_count=segment_count,
+            coverage_seconds=coverage_seconds,
+            audio_note=self._build_audio_note(audio_count),
+            transcript_note=self._build_transcript_note(transcript_count),
+        )
+
+    def _build_transcript_segment_text(
+        self,
+        policy: HintPolicy,
+        chunk: TranscriptChunk,
+    ) -> str:
+        return self._format_template(
+            policy.transcript_segment_template,
+            DEFAULT_TRANSCRIPT_SEGMENT_TEMPLATE,
+            segment_label=chunk.segment_label,
+            start_seconds=chunk.start_seconds,
+            end_seconds=chunk.end_seconds,
+            transcript=chunk.text,
         )
 
     def _build_transcript_text(
@@ -1264,13 +1765,20 @@ class VideoVisionHelper(Star):
         policy: HintPolicy,
         *,
         video_name: str,
-        transcript: str,
-    ) -> str:
+        transcript_chunks: list[TranscriptChunk],
+    ) -> str | None:
+        if not transcript_chunks:
+            return None
+        transcript_body = "\n".join(
+            self._build_transcript_segment_text(policy, chunk)
+            for chunk in transcript_chunks
+        )
         return self._format_template(
             policy.transcript_template,
             DEFAULT_TRANSCRIPT_TEMPLATE,
             video_name=video_name,
-            transcript=transcript,
+            segment_count=len(transcript_chunks),
+            transcript=transcript_body,
         )
 
     @staticmethod
@@ -1322,10 +1830,28 @@ class VideoVisionHelper(Star):
             logger.warning("[%s] video path does not exist: %s", PLUGIN_ID, attachment.path)
             return None
 
+        started_at = time.monotonic()
+        if self._is_processing_budget_exhausted(
+            attachment,
+            started_at,
+            settings.runtime,
+            stage="probe",
+        ):
+            return None
+
+        probe_timeout_seconds = int(
+            math.ceil(
+                self._resolve_timeout_seconds(
+                    settings.ffmpeg.command_timeout_seconds,
+                    self._remaining_processing_seconds(started_at, settings.runtime),
+                ),
+            ),
+        )
         probe_info = await asyncio.to_thread(
             self._probe_video_info,
             attachment.path,
             settings.ffmpeg,
+            timeout_seconds=probe_timeout_seconds,
         )
         if not probe_info or not probe_info.has_video_stream:
             logger.warning("[%s] file is not a probeable video: %s", PLUGIN_ID, attachment.path)
@@ -1338,70 +1864,240 @@ class VideoVisionHelper(Star):
             probe_info.has_audio_stream,
         )
 
-        frame_paths: list[Path] = []
-        if settings.frame.enabled:
-            timestamps = self._decide_frame_timestamps(
-                probe_info.duration_seconds,
-                settings.frame,
-            )
-            self._debug("frame timestamps for %s: %s", attachment.path, timestamps)
-            for index, timestamp in enumerate(timestamps):
-                output_path = self._make_temp_path(f"_frame_{index + 1}.jpg")
-                success = await asyncio.to_thread(
-                    self._extract_frame,
-                    attachment.path,
-                    timestamp,
-                    output_path,
-                    policy=settings.frame,
-                    ffmpeg_policy=settings.ffmpeg,
-                )
-                if not success:
-                    output_path.unlink(missing_ok=True)
-                    continue
-                frame_paths.append(output_path)
-                self._track_temp_file(event, output_path)
-            self._debug("extracted %s frame(s) for %s", len(frame_paths), attachment.path)
-
-        audio_path: Path | None = None
-        transcript: str | None = None
         wants_attach = settings.audio.mode in {"attach", "attach_and_stt"}
         wants_stt = settings.audio.mode in {"stt", "attach_and_stt"}
+        wants_audio_processing = probe_info.has_audio_stream and (wants_attach or wants_stt)
+        frame_segments = self._build_video_segments(
+            probe_info.duration_seconds,
+            float(settings.frame.max_video_duration_seconds),
+            settings.segment,
+        ) if settings.frame.enabled else []
+        audio_segments = self._build_video_segments(
+            probe_info.duration_seconds,
+            float(settings.audio.max_audio_duration_seconds),
+            settings.segment,
+        ) if wants_audio_processing else []
 
-        if probe_info.has_audio_stream and (wants_attach or wants_stt):
-            candidate_audio_path = self._make_temp_path(".wav")
-            extracted_audio = await asyncio.to_thread(
-                self._extract_audio,
+        if frame_segments:
+            self._debug(
+                "planned %s frame segment(s) for %s: %s",
+                len(frame_segments),
                 attachment.path,
-                candidate_audio_path,
-                policy=settings.audio,
-                ffmpeg_policy=settings.ffmpeg,
+                [
+                    {
+                        "label": segment.label,
+                        "start": segment.start_seconds,
+                        "duration": segment.duration_seconds,
+                    }
+                    for segment in frame_segments
+                ],
             )
-            if extracted_audio:
-                self._track_temp_file(event, candidate_audio_path)
-                self._debug("extracted audio for %s to %s", attachment.path, candidate_audio_path)
-                if wants_attach:
-                    audio_path = candidate_audio_path
-                if wants_stt:
+        if audio_segments:
+            self._debug(
+                "planned %s audio segment(s) for %s: %s",
+                len(audio_segments),
+                attachment.path,
+                [
+                    {
+                        "label": segment.label,
+                        "start": segment.start_seconds,
+                        "duration": segment.duration_seconds,
+                    }
+                    for segment in audio_segments
+                ],
+            )
+
+        frame_paths: list[Path] = []
+        covered_segments: dict[str, float] = {}
+        if settings.frame.enabled:
+            frame_distribution = self._distribute_items(
+                settings.frame.max_frames_per_video,
+                len(frame_segments),
+            )
+            seen_timestamps: set[float] = set()
+            for segment, segment_frame_count in zip(frame_segments, frame_distribution):
+                if segment_frame_count <= 0:
+                    continue
+                if self._is_processing_budget_exhausted(
+                    attachment,
+                    started_at,
+                    settings.runtime,
+                    stage="frame_planning",
+                ):
+                    break
+
+                local_timestamps = self._decide_frame_timestamps(
+                    segment.duration_seconds,
+                    settings.frame,
+                    frame_count=segment_frame_count,
+                )
+                self._debug(
+                    "frame timestamps for %s %s: %s",
+                    attachment.path,
+                    segment.label,
+                    local_timestamps,
+                )
+                for local_index, local_timestamp in enumerate(local_timestamps, start=1):
+                    if self._is_processing_budget_exhausted(
+                        attachment,
+                        started_at,
+                        settings.runtime,
+                        stage="frame_extraction",
+                    ):
+                        break
+                    absolute_timestamp = self._clamp_timestamp(
+                        segment.start_seconds + local_timestamp,
+                        probe_info.duration_seconds,
+                    )
+                    rounded_timestamp = round(absolute_timestamp, 3)
+                    if rounded_timestamp in seen_timestamps:
+                        continue
+                    seen_timestamps.add(rounded_timestamp)
+                    output_path = self._make_temp_path(
+                        f"_segment_{segment.index}_frame_{local_index}.jpg",
+                    )
+                    frame_timeout_seconds = int(
+                        math.ceil(
+                            self._resolve_timeout_seconds(
+                                settings.ffmpeg.command_timeout_seconds,
+                                self._remaining_processing_seconds(started_at, settings.runtime),
+                            ),
+                        ),
+                    )
+                    success = await asyncio.to_thread(
+                        self._extract_frame,
+                        attachment.path,
+                        absolute_timestamp,
+                        output_path,
+                        policy=settings.frame,
+                        ffmpeg_policy=settings.ffmpeg,
+                        timeout_seconds=frame_timeout_seconds,
+                    )
+                    if not success:
+                        output_path.unlink(missing_ok=True)
+                        continue
+                    frame_paths.append(output_path)
+                    segment_key = self._segment_key(segment)
+                    covered_segments[segment_key] = max(
+                        covered_segments.get(segment_key, 0.0),
+                        segment.duration_seconds,
+                    )
+                    self._track_temp_file(event, output_path)
+            self._debug("extracted %s frame(s) for %s", len(frame_paths), attachment.path)
+
+        audio_paths: list[Path] = []
+        transcript_chunks: list[TranscriptChunk] = []
+        if wants_audio_processing:
+            remaining_audio_budget = float(settings.audio.max_audio_duration_seconds)
+            for segment in audio_segments:
+                if remaining_audio_budget <= 0:
+                    break
+                if self._is_processing_budget_exhausted(
+                    attachment,
+                    started_at,
+                    settings.runtime,
+                    stage="audio_extraction",
+                ):
+                    break
+
+                audio_duration_seconds = min(segment.duration_seconds, remaining_audio_budget)
+                if audio_duration_seconds <= 0:
+                    break
+
+                candidate_audio_path = self._make_temp_path(f"_segment_{segment.index}.wav")
+                audio_timeout_seconds = int(
+                    math.ceil(
+                        self._resolve_timeout_seconds(
+                            settings.ffmpeg.command_timeout_seconds,
+                            self._remaining_processing_seconds(started_at, settings.runtime),
+                        ),
+                    ),
+                )
+                extracted_audio = await asyncio.to_thread(
+                    self._extract_audio,
+                    attachment.path,
+                    candidate_audio_path,
+                    start_seconds=segment.start_seconds,
+                    duration_seconds=audio_duration_seconds,
+                    policy=settings.audio,
+                    ffmpeg_policy=settings.ffmpeg,
+                    timeout_seconds=audio_timeout_seconds,
+                )
+                if not extracted_audio:
+                    candidate_audio_path.unlink(missing_ok=True)
+                    self._debug(
+                        "audio extraction failed or produced no output for %s %s",
+                        attachment.path,
+                        segment.label,
+                    )
+                    continue
+
+                self._debug(
+                    "extracted audio for %s %s to %s",
+                    attachment.path,
+                    segment.label,
+                    candidate_audio_path,
+                )
+                segment_key = self._segment_key(segment)
+                covered_segments[segment_key] = max(
+                    covered_segments.get(segment_key, 0.0),
+                    audio_duration_seconds,
+                )
+                transcript: str | None = None
+                if wants_stt and not self._is_processing_budget_exhausted(
+                    attachment,
+                    started_at,
+                    settings.runtime,
+                    stage="stt",
+                ):
                     transcript = await self._transcribe_audio(
                         event,
                         candidate_audio_path,
                         settings.stt,
+                        timeout_seconds=self._remaining_processing_seconds(
+                            started_at,
+                            settings.runtime,
+                        ),
                     )
-                    if transcript is None and not audio_path and settings.audio.fallback_to_attachment_on_stt_failure:
-                        audio_path = candidate_audio_path
-            else:
-                candidate_audio_path.unlink(missing_ok=True)
-                self._debug("audio extraction failed or produced no output for %s", attachment.path)
+                if transcript:
+                    transcript_chunks.append(
+                        TranscriptChunk(
+                            segment_label=segment.label,
+                            start_seconds=segment.start_seconds,
+                            end_seconds=segment.start_seconds + audio_duration_seconds,
+                            text=transcript,
+                        ),
+                    )
 
-        if not frame_paths and not audio_path and not transcript:
+                should_attach_audio = wants_attach or (
+                    transcript is None
+                    and not wants_attach
+                    and settings.audio.fallback_to_attachment_on_stt_failure
+                )
+                if should_attach_audio:
+                    audio_paths.append(candidate_audio_path)
+                    self._track_temp_file(event, candidate_audio_path)
+                else:
+                    candidate_audio_path.unlink(missing_ok=True)
+
+                remaining_audio_budget -= audio_duration_seconds
+
+        transcript_chunks = self._limit_transcript_chunks(
+            transcript_chunks,
+            settings.stt.max_total_transcript_chars,
+        )
+
+        if not frame_paths and not audio_paths and not transcript_chunks:
             self._debug("video %s produced no usable multimodal artifacts", attachment.path)
             return None
 
         return ProcessedVideo(
             attachment=attachment,
             frame_paths=frame_paths,
-            audio_path=audio_path,
-            transcript=transcript,
+            audio_paths=audio_paths,
+            transcript_chunks=transcript_chunks,
+            segment_count=len(covered_segments),
+            coverage_seconds=sum(covered_segments.values()),
         )
 
     @filter.on_llm_request()
@@ -1414,14 +2110,17 @@ class VideoVisionHelper(Star):
             return
 
         self._debug(
-            "handling llm request with frame_enabled=%s audio_mode=%s stt_backend=%s hint_target=%s",
+            "handling llm request with frame_enabled=%s audio_mode=%s stt_backend=%s hint_target=%s segment_enabled=%s download_limit_mb=%.2f processing_limit_s=%s",
             settings.frame.enabled,
             settings.audio.mode,
             settings.stt.backend,
             settings.hint.target,
+            settings.segment.enabled,
+            settings.download.max_download_size_mb,
+            settings.runtime.max_processing_seconds_per_video or "disabled",
         )
 
-        attachments = await self._collect_video_attachments(event, req)
+        attachments = await self._collect_video_attachments(event, req, settings)
         if not attachments:
             self._debug("no video attachments were collected for this request")
             return
@@ -1454,44 +2153,64 @@ class VideoVisionHelper(Star):
         total_frame_count = 0
         attached_audio_count = 0
         transcript_count = 0
+        total_segment_count = 0
+        total_coverage_seconds = 0.0
+        video_texts: list[str] = []
         transcript_texts: list[str] = []
 
         for result in processed_results:
             if result.frame_paths:
                 req.image_urls.extend(str(path) for path in result.frame_paths)
                 total_frame_count += len(result.frame_paths)
-            if result.audio_path:
-                req.audio_urls.append(str(result.audio_path))
-                attached_audio_count += 1
-            if result.transcript:
-                transcript_count += 1
-                transcript_texts.append(
-                    self._build_transcript_text(
+            if result.audio_paths:
+                req.audio_urls.extend(str(path) for path in result.audio_paths)
+                attached_audio_count += len(result.audio_paths)
+            total_segment_count += result.segment_count
+            total_coverage_seconds += result.coverage_seconds
+            transcript_count += len(result.transcript_chunks)
+
+            if settings.hint.enabled:
+                video_texts.append(
+                    self._build_video_text(
                         settings.hint,
                         video_name=result.attachment.name,
-                        transcript=result.transcript,
+                        frame_count=len(result.frame_paths),
+                        segment_count=result.segment_count,
+                        coverage_seconds=result.coverage_seconds,
+                        audio_count=len(result.audio_paths),
+                        transcript_count=len(result.transcript_chunks),
                     ),
                 )
+                transcript_text = self._build_transcript_text(
+                    settings.hint,
+                    video_name=result.attachment.name,
+                    transcript_chunks=result.transcript_chunks,
+                )
+                if transcript_text:
+                    transcript_texts.append(transcript_text)
 
         if settings.hint.enabled:
             summary_text = self._build_summary_text(
                 settings.hint,
                 video_count=len(processed_results),
                 frame_count=total_frame_count,
+                segment_count=total_segment_count,
+                coverage_seconds=total_coverage_seconds,
                 audio_count=attached_audio_count,
                 transcript_count=transcript_count,
             )
             self._apply_texts(
                 req,
                 settings.hint.target,
-                [summary_text, *transcript_texts],
+                [summary_text, *video_texts, *transcript_texts],
             )
 
         logger.info(
-            "[%s] expanded %s video attachment(s): +%s frames, +%s audios, +%s transcripts",
+            "[%s] expanded %s video attachment(s): +%s frames, +%s audios, +%s transcripts across %s segment(s)",
             PLUGIN_ID,
             len(processed_results),
             total_frame_count,
             attached_audio_count,
             transcript_count,
+            total_segment_count,
         )

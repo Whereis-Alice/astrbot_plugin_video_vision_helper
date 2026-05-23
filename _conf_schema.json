@@ -2,102 +2,141 @@
   "enabled": {
     "type": "bool",
     "default": true,
-    "description": "\u542f\u7528 Video Vision Helper",
-    "hint": "\u5173\u95ed\u540e\u5c06\u4fdd\u6301 AstrBot \u9ed8\u8ba4\u7684\u89c6\u9891\u9644\u4ef6\u5904\u7406\u65b9\u5f0f\u3002"
+    "description": "?? Video Vision Helper",
+    "hint": "?????? AstrBot ????????????"
   },
   "debug_logging": {
     "type": "bool",
     "default": false,
-    "description": "\u542f\u7528\u63d2\u4ef6 Debug \u65e5\u5fd7",
-    "hint": "\u6253\u5f00\u540e\u4f1a\u8f93\u51fa\u66f4\u8be6\u7ec6\u7684\u89c6\u9891\u89e3\u6790\u3001STT \u9009\u8def\u3001\u63d0\u793a\u6ce8\u5165\u548c quoted video \u8def\u5f84\u89e3\u6790\u4fe1\u606f\uff0c\u9002\u5408\u6392\u9519\u65f6\u4f7f\u7528\u3002"
+    "description": "???? Debug ??",
+    "hint": "????????????????????STT ???????? quoted video ???????????????"
   },
   "ffmpeg_policy": {
     "type": "object",
-    "description": "FFmpeg \u6267\u884c\u7b56\u7565",
+    "description": "FFmpeg ????",
     "items": {
       "ffmpeg_path": {
         "type": "string",
         "default": "ffmpeg",
-        "description": "FFmpeg \u53ef\u6267\u884c\u8def\u5f84",
-        "hint": "\u9ed8\u8ba4\u4ece PATH \u4e2d\u67e5\u627e ffmpeg\u3002"
+        "description": "FFmpeg ?????",
+        "hint": "??? PATH ??? ffmpeg?"
       },
       "ffprobe_path": {
         "type": "string",
         "default": "ffprobe",
-        "description": "FFprobe \u53ef\u6267\u884c\u8def\u5f84",
-        "hint": "\u9ed8\u8ba4\u4ece PATH \u4e2d\u67e5\u627e ffprobe\u3002"
+        "description": "FFprobe ?????",
+        "hint": "??? PATH ??? ffprobe?"
       },
       "command_timeout_seconds": {
         "type": "int",
         "default": 120,
-        "description": "\u5355\u6b21 FFmpeg \u547d\u4ee4\u8d85\u65f6\u65f6\u95f4\uff08\u79d2\uff09",
-        "hint": "\u62bd\u5e27\u3001\u62bd\u97f3\u9891\u3001\u63a2\u6d4b\u89c6\u9891\u90fd\u4f1a\u53d7\u8fd9\u4e2a\u8d85\u65f6\u9650\u5236\u3002"
+        "description": "?? FFmpeg / FFprobe ?????????",
+        "hint": "??????????????????????"
       }
     }
   },
   "frame_policy": {
     "type": "object",
-    "description": "\u5173\u952e\u5e27\u62bd\u53d6\u7b56\u7565",
+    "description": "???????",
     "items": {
       "enabled": {
         "type": "bool",
         "default": true,
-        "description": "\u542f\u7528\u89c6\u9891\u62bd\u5e27"
+        "description": "??????"
       },
       "max_videos_per_request": {
         "type": "int",
         "default": 2,
-        "description": "\u5355\u6b21\u8bf7\u6c42\u6700\u591a\u5904\u7406\u7684\u89c6\u9891\u6570"
+        "description": "????????????"
       },
       "sampling_mode": {
         "type": "string",
         "default": "uniform",
-        "description": "\u62bd\u5e27\u6a21\u5f0f",
-        "hint": "`uniform` \u4f1a\u5747\u5300\u8986\u76d6\u5206\u6790\u65f6\u957f\uff0c`fixed_interval` \u4f1a\u6309\u56fa\u5b9a\u95f4\u9694\u62bd\u5e27\u3002",
+        "description": "????",
+        "hint": "`uniform` ????????????`fixed_interval` ????????`head_tail` ?????????????",
         "options": [
           "uniform",
-          "fixed_interval"
+          "fixed_interval",
+          "head_tail"
         ]
       },
       "max_frames_per_video": {
         "type": "int",
         "default": 6,
-        "description": "\u6bcf\u4e2a\u89c6\u9891\u6700\u591a\u62bd\u53d6\u7684\u5173\u952e\u5e27\u6570"
+        "description": "?????????????"
       },
       "fixed_interval_seconds": {
         "type": "float",
         "default": 2.0,
-        "description": "\u56fa\u5b9a\u95f4\u9694\u62bd\u5e27\u7684\u95f4\u9694\u79d2\u6570",
-        "hint": "\u4ec5\u5728 `sampling_mode = fixed_interval` \u65f6\u751f\u6548\u3002"
+        "description": "?????????",
+        "hint": "?? `sampling_mode = fixed_interval` ????"
       },
       "max_side": {
         "type": "int",
         "default": 768,
-        "description": "\u62bd\u53d6\u540e\u5355\u5e27\u7684\u6700\u957f\u8fb9\u4e0a\u9650"
+        "description": "???????????"
       },
       "jpeg_quality": {
         "type": "int",
         "default": 90,
-        "description": "JPEG \u8d28\u91cf",
-        "hint": "\u8303\u56f4\u5efa\u8bae 70 \u5230 95\uff0c\u8d8a\u9ad8\u8d8a\u6e05\u6670\u3002"
+        "description": "JPEG ??",
+        "hint": "???? 70 ? 95???????"
       },
       "max_video_duration_seconds": {
         "type": "int",
         "default": 30,
-        "description": "\u5355\u4e2a\u89c6\u9891\u6700\u591a\u5206\u6790\u7684\u65f6\u957f\uff08\u79d2\uff09",
-        "hint": "\u8d85\u8fc7\u8fd9\u4e2a\u65f6\u957f\u65f6\uff0c\u63d2\u4ef6\u53ea\u4f1a\u5206\u6790\u524d\u534a\u90e8\u5206\u5185\u5bb9\u3002"
+        "description": "???????????????????",
+        "hint": "??????????????????????? `segment_policy` ???????????????????"
+      }
+    }
+  },
+  "segment_policy": {
+    "type": "object",
+    "description": "???????",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "???????"
+      },
+      "selection_mode": {
+        "type": "string",
+        "default": "uniform",
+        "description": "??????",
+        "hint": "`head_only` ???????`uniform` ?????????????`head_tail` ?????????",
+        "options": [
+          "head_only",
+          "uniform",
+          "head_tail"
+        ]
+      },
+      "segment_duration_seconds": {
+        "type": "int",
+        "default": 30,
+        "description": "???????????"
+      },
+      "max_segments_per_video": {
+        "type": "int",
+        "default": 4,
+        "description": "???????????????"
+      },
+      "min_video_duration_seconds": {
+        "type": "int",
+        "default": 45,
+        "description": "??????????????",
+        "hint": "??????????????????"
       }
     }
   },
   "audio_policy": {
     "type": "object",
-    "description": "\u97f3\u9891\u5904\u7406\u7b56\u7565",
+    "description": "??????",
     "items": {
       "mode": {
         "type": "string",
         "default": "attach",
-        "description": "\u97f3\u9891\u5904\u7406\u6a21\u5f0f",
-        "hint": "`attach` \u9002\u5408\u80fd\u7406\u89e3\u97f3\u9891\u7684\u6a21\u578b\uff0c`stt` \u9002\u5408\u4e0d\u652f\u6301\u97f3\u9891\u7684\u6a21\u578b\uff0c`attach_and_stt` \u4f1a\u4e24\u8005\u90fd\u505a\u3002",
+        "description": "??????",
+        "hint": "`attach` ???????????`stt` ???????????`attach_and_stt` ??????",
         "options": [
           "disabled",
           "attach",
@@ -108,30 +147,31 @@
       "sample_rate": {
         "type": "int",
         "default": 16000,
-        "description": "\u62bd\u53d6\u97f3\u9891\u7684\u91c7\u6837\u7387"
+        "description": "????????"
       },
       "max_audio_duration_seconds": {
         "type": "int",
         "default": 90,
-        "description": "\u5355\u4e2a\u89c6\u9891\u6700\u591a\u62bd\u53d6\u7684\u97f3\u9891\u65f6\u957f\uff08\u79d2\uff09"
+        "description": "?????????? / STT ???????????",
+        "hint": "????????????????????????? `segment_policy` ???????????????????"
       },
       "fallback_to_attachment_on_stt_failure": {
         "type": "bool",
         "default": true,
-        "description": "STT \u5931\u8d25\u65f6\u662f\u5426\u56de\u9000\u5230\u4ec5\u9644\u5e26\u97f3\u9891",
-        "hint": "\u4ec5\u5728 `mode = stt` \u6216 `mode = attach_and_stt` \u65f6\u6709\u610f\u4e49\u3002"
+        "description": "STT ?????????????",
+        "hint": "?? `mode = stt` ? `mode = attach_and_stt` ?????"
       }
     }
   },
   "stt_policy": {
     "type": "object",
-    "description": "\u97f3\u9891\u8f6c\u5199\u7b56\u7565",
+    "description": "??????",
     "items": {
       "backend": {
         "type": "string",
         "default": "disabled",
-        "description": "STT \u540e\u7aef",
-        "hint": "`astrbot_configured` \u4f1a\u76f4\u63a5\u4f7f\u7528 AstrBot \u5df2\u914d\u7f6e\u7684 STT \u4f9b\u5e94\u5546\uff0c`openai_compatible` \u5219\u8d70\u63d2\u4ef6\u81ea\u5b9a\u4e49\u7684\u8f6c\u5199\u63a5\u53e3\u3002",
+        "description": "STT ??",
+        "hint": "`astrbot_configured` ????? AstrBot ???? STT ????`openai_compatible` ?????????????",
         "options": [
           "disabled",
           "astrbot_configured",
@@ -141,71 +181,77 @@
       "astrbot_provider_id": {
         "type": "string",
         "default": "",
-        "description": "AstrBot STT \u4f9b\u5e94\u5546 ID\uff08\u53ef\u9009\uff09",
-        "hint": "\u4ec5\u5728 `backend = astrbot_configured` \u65f6\u751f\u6548\u3002\u4e0d\u586b\u5219\u8ddf\u968f\u5f53\u524d\u4f1a\u8bdd\u6216 AstrBot \u7684\u9ed8\u8ba4 STT \u914d\u7f6e\uff0c\u586b\u5199\u540e\u4f1a\u5f3a\u5236\u4f7f\u7528\u6307\u5b9a provider id\u3002"
+        "description": "AstrBot STT ??? ID????",
+        "hint": "?? `backend = astrbot_configured` ?????????????? AstrBot ?? STT ????????????? provider id?"
       },
       "endpoint": {
         "type": "string",
         "default": "",
-        "description": "\u8f6c\u5199\u63a5\u53e3\u5730\u5740",
-        "hint": "\u4ec5\u5728 `backend = openai_compatible` \u65f6\u751f\u6548\u3002\u53ef\u586b `/audio/transcriptions` \u5b8c\u6574\u7aef\u70b9\uff0c\u6216\u586b\u5230 `/v1` \u8fd9\u4e00\u5c42\u3002"
+        "description": "??????",
+        "hint": "?? `backend = openai_compatible` ?????? `/audio/transcriptions` ????????? `/v1` ????"
       },
       "api_key": {
         "type": "string",
         "default": "",
         "description": "STT API Key",
-        "hint": "\u4ec5\u5728 `backend = openai_compatible` \u65f6\u751f\u6548\u3002"
+        "hint": "?? `backend = openai_compatible` ????"
       },
       "model": {
         "type": "string",
         "default": "",
-        "description": "\u8f6c\u5199\u6a21\u578b ID",
-        "hint": "\u4ec5\u5728 `backend = openai_compatible` \u65f6\u751f\u6548\u3002"
+        "description": "???? ID",
+        "hint": "?? `backend = openai_compatible` ????"
       },
       "language": {
         "type": "string",
         "default": "",
-        "description": "\u8f6c\u5199\u8bed\u8a00",
-        "hint": "\u4ec5\u5728 `backend = openai_compatible` \u65f6\u751f\u6548\u3002\u4f8b\u5982 `zh` \u6216 `en`\uff0c\u4e0d\u586b\u5219\u7531\u540e\u7aef\u81ea\u52a8\u5224\u65ad\u3002"
+        "description": "????",
+        "hint": "?? `backend = openai_compatible` ?????? `zh` ? `en`????????????"
       },
       "prompt": {
         "type": "text",
         "default": "",
-        "description": "\u989d\u5916\u8f6c\u5199\u63d0\u793a\u8bcd",
-        "hint": "\u4ec5\u5728 `backend = openai_compatible` \u65f6\u751f\u6548\u3002\u53ef\u7528\u4e8e\u5f3a\u5316\u9886\u57df\u8bcd\u6c47\u3001\u4e13\u6709\u540d\u8bcd\u6216\u8f6c\u5199\u98ce\u683c\u3002"
+        "description": "???????",
+        "hint": "?? `backend = openai_compatible` ????????????????????????"
       },
       "temperature": {
         "type": "float",
         "default": 0.0,
         "description": "STT temperature",
-        "hint": "\u4ec5\u5728 `backend = openai_compatible` \u65f6\u751f\u6548\u3002"
+        "hint": "?? `backend = openai_compatible` ????"
       },
       "timeout_seconds": {
         "type": "int",
         "default": 120,
-        "description": "STT \u8bf7\u6c42\u8d85\u65f6\u65f6\u95f4\uff08\u79d2\uff09",
-        "hint": "\u4ec5\u5728 `backend = openai_compatible` \u65f6\u4f5c\u4e3a HTTP \u8bf7\u6c42\u8d85\u65f6\u65f6\u95f4\u3002"
+        "description": "STT ?????????",
+        "hint": "?? `backend = openai_compatible` ??? HTTP ???????"
       },
       "max_transcript_chars": {
         "type": "int",
         "default": 1200,
-        "description": "\u5355\u6761\u8f6c\u5199\u6700\u5927\u4fdd\u7559\u5b57\u7b26\u6570"
+        "description": "?????????????"
+      },
+      "max_total_transcript_chars": {
+        "type": "int",
+        "default": 2400,
+        "description": "?????????????????",
+        "hint": "??????????????????????????????????????"
       }
     }
   },
   "hint_policy": {
     "type": "object",
-    "description": "\u63d0\u793a\u6ce8\u5165\u7b56\u7565",
+    "description": "??????",
     "items": {
       "enabled": {
         "type": "bool",
         "default": true,
-        "description": "\u542f\u7528\u89c6\u9891\u8bf4\u660e\u63d0\u793a"
+        "description": "????????"
       },
       "target": {
         "type": "string",
         "default": "extra_user_content",
-        "description": "\u63d0\u793a\u6ce8\u5165\u4f4d\u7f6e",
+        "description": "??????",
         "options": [
           "extra_user_content",
           "prompt",
@@ -215,19 +261,66 @@
       "remove_raw_video_marker_after_processing": {
         "type": "bool",
         "default": true,
-        "description": "\u5904\u7406\u6210\u529f\u540e\u79fb\u9664 AstrBot Core \u751f\u6210\u7684\u539f\u59cb\u89c6\u9891\u8def\u5f84\u63d0\u793a"
+        "description": "??????? AstrBot Core ???????????"
       },
       "summary_template": {
         "type": "text",
-        "default": "[\u7cfb\u7edf\u63d0\u793a] \u672c\u6b21\u7528\u6237\u53d1\u9001\u4e86 {video_count} \u4e2a\u89c6\u9891\uff0c\u63d2\u4ef6\u5df2\u62bd\u53d6 {frame_count} \u5f20\u5173\u952e\u5e27{audio_note}{transcript_note}\u3002\u8bf7\u7efc\u5408\u955c\u5934\u53d8\u5316\u3001\u4eba\u7269\u52a8\u4f5c\u3001\u5b57\u5e55\u548c\u58f0\u97f3\u7ebf\u7d22\u7406\u89e3\u89c6\u9891\u5185\u5bb9\u3002",
-        "description": "\u89c6\u9891\u603b\u89c8\u63d0\u793a\u6a21\u677f",
-        "hint": "\u53ef\u4f7f\u7528 {video_count} {frame_count} {audio_note} {transcript_note} \u5360\u4f4d\u7b26\u3002"
+        "default": "[????] ??????? {video_count} ????????? {segment_count} ???????? {frame_count} ????{audio_note}{transcript_note}??????? {coverage_seconds:.1f} ?????????????????????????",
+        "description": "???????????",
+        "hint": "??? {video_count} {segment_count} {frame_count} {coverage_seconds} {audio_note} {transcript_note} ????"
+      },
+      "video_template": {
+        "type": "text",
+        "default": "[????][{video_name}] ?? {segment_count} ?????? {frame_count} ????{audio_note}{transcript_note}?????? {coverage_seconds:.1f} ??",
+        "description": "????????",
+        "hint": "??? {video_name} {segment_count} {frame_count} {coverage_seconds} {audio_note} {transcript_note} ????"
       },
       "transcript_template": {
         "type": "text",
-        "default": "[\u89c6\u9891\u97f3\u9891\u8f6c\u5199][{video_name}] {transcript}",
-        "description": "\u5355\u6761 STT \u7ed3\u679c\u7684\u63d0\u793a\u6a21\u677f",
-        "hint": "\u53ef\u4f7f\u7528 {video_name} \u548c {transcript} \u5360\u4f4d\u7b26\u3002"
+        "default": "[??????][{video_name}] ? {segment_count} ????\n{transcript}",
+        "description": "??????????",
+        "hint": "??? {video_name} {segment_count} {transcript} ????"
+      },
+      "transcript_segment_template": {
+        "type": "text",
+        "default": "- {segment_label} ({start_seconds:.1f}s-{end_seconds:.1f}s): {transcript}",
+        "description": "????????",
+        "hint": "??? {segment_label} {start_seconds} {end_seconds} {transcript} ????"
+      }
+    }
+  },
+  "download_policy": {
+    "type": "object",
+    "description": "????????",
+    "items": {
+      "quoted_video_download_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "??? quoted video ??? URL ????",
+        "hint": "???? OneBot / aiocqhttp ?????? `url` ?????????????"
+      },
+      "max_download_size_mb": {
+        "type": "float",
+        "default": 64.0,
+        "description": "?????????????MB?",
+        "hint": "? 0 ?????????????????? `content-length` ????????"
+      },
+      "timeout_seconds": {
+        "type": "int",
+        "default": 120,
+        "description": "???????????????"
+      }
+    }
+  },
+  "runtime_policy": {
+    "type": "object",
+    "description": "????????",
+    "items": {
+      "max_processing_seconds_per_video": {
+        "type": "int",
+        "default": 180,
+        "description": "?????????????????",
+        "hint": "? 0 ?????????????????????????????? STT?"
       }
     }
   }
