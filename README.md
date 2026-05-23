@@ -37,6 +37,7 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 - 支持视频被跳过时注入明确兜底提示，方便模型知道用户确实发过视频
 - 支持 `debug_logging` 调试开关，便于排查视频解析和 STT 问题
 - 支持可选记录 STT 转写预览到 Debug 日志，排错时更容易确认音频是否识别正确
+- 支持插件自己的 `cleanup_policy`，可兜底清理过期的插件临时文件
 - 支持把说明提示注入到 `extra_user_content`、`prompt` 或 `system_prompt`
 - 成功处理后可移除 AstrBot Core 注入的原始视频路径提示
 
@@ -118,6 +119,25 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 - `frame_policy.max_total_frame_bytes_mb`
 
 如果日志里出现 `processing time limit was reached at stage=frame_extraction`，说明瓶颈不在模型，而在本地 FFmpeg 抽帧耗时。可以优先确认 `ffmpeg_policy.frame_seek_mode = fast`，再提高 `runtime_policy.max_processing_seconds_per_video`，或者适当降低长视频总帧数。
+
+## 临时文件与清理策略
+
+插件不会做持久视频缓存。处理过程中会在系统临时目录生成带有 `astrbot_plugin_video_vision_helper_` 前缀的临时文件，例如引用视频下载文件、抽取的 JPG 帧、临时 WAV 音频。
+
+正常情况下，插件会把需要随请求传给模型的临时文件交给 AstrBot 的事件级临时文件追踪器，由 AstrBot 在请求生命周期结束后清理。对于 STT 后不需要附带给模型的音频，插件会立即删除。
+
+`cleanup_policy` 是插件自己的兜底清理策略，主要处理异常退出、请求中断、平台下载中断或 AstrBot 没来得及清理时残留的过期文件。它只会删除系统临时目录里文件名以 `astrbot_plugin_video_vision_helper_` 开头、且超过保留时间的普通文件，不会清理 AstrBot 其它缓存，也不会扫描插件目录。
+
+默认策略：
+
+- `cleanup_policy.enabled = true`
+- `cleanup_policy.cleanup_on_startup = true`
+- `cleanup_policy.cleanup_after_request = true`
+- `cleanup_policy.ttl_hours = 24`
+- `cleanup_policy.min_cleanup_interval_minutes = 30`
+- `cleanup_policy.max_files_per_run = 200`
+
+如果你希望更激进地清理，可以把 `ttl_hours` 调小；如果你正在排查请求链路，建议保留默认 24 小时，这样临时文件不容易在刚处理完时被误删。
 
 ## STT 配置说明
 
@@ -219,6 +239,7 @@ Error processing quoted video attachment: not a valid file: 8703a2ebfa5f99dd29ce
 - `hint_policy`：说明提示的注入位置，以及总览 / 单视频 / 分段转写 / 跳过视频模板
 - `download_policy`：quoted video 远程下载开关、下载体积限制和超时
 - `runtime_policy`：单视频总处理时长限制
+- `cleanup_policy`：插件临时文件兜底清理开关、保留时长、清理间隔和单次清理数量
 
 ## 已知限制
 
@@ -227,6 +248,7 @@ Error processing quoted video attachment: not a valid file: 8703a2ebfa5f99dd29ce
 - 即使启用分段，也仍然会受到帧数、音频总时长、转写长度、下载体积和总处理时长限制
 - 如果视频超过下载限制、处理失败或图片预算不足，插件会注入一条跳过说明，但不会强行处理超出预算的视频
 - 转写文本会按 `max_transcript_chars` 和 `max_total_transcript_chars` 双重限制，防止提示过长
+- `cleanup_policy` 只清理本插件生成的过期临时文件，不负责清理 AstrBot Core、平台适配器或其它插件的缓存
 - 如果平台适配器对引用视频只返回裸文件名而没有真实路径，AstrBot Core 仍可能先打印一条错误日志
 
 ## 更新日志

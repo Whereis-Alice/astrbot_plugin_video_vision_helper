@@ -9,6 +9,7 @@ native video input channel.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import subprocess
@@ -32,8 +33,8 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 
 PLUGIN_ID = "astrbot_plugin_video_vision_helper"
-PLUGIN_VERSION = "0.4.2"
-PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u589e\u5f3a\u591a\u6a21\u6001\u89c6\u9891\u7406\u89e3"
+PLUGIN_VERSION = "0.4.3"
+PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u5e76\u63d0\u4f9b\u63d2\u4ef6\u4e34\u65f6\u6587\u4ef6\u6e05\u7406\u7b56\u7565"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper"
 
 DEFAULT_SUMMARY_TEMPLATE = (
@@ -137,6 +138,16 @@ class RuntimePolicy:
 
 
 @dataclass(frozen=True)
+class CleanupPolicy:
+    enabled: bool
+    cleanup_on_startup: bool
+    cleanup_after_request: bool
+    ttl_hours: int
+    min_cleanup_interval_minutes: int
+    max_files_per_run: int
+
+
+@dataclass(frozen=True)
 class PluginSettings:
     enabled: bool
     ffmpeg: FFmpegPolicy
@@ -147,6 +158,7 @@ class PluginSettings:
     hint: HintPolicy
     download: DownloadPolicy
     runtime: RuntimePolicy
+    cleanup: CleanupPolicy
 
 
 @dataclass(frozen=True)
@@ -236,11 +248,20 @@ class VideoVisionHelper(Star):
     ) -> None:
         super().__init__(context, config)
         self.config = config or {}
+        self._last_cleanup_at = 0.0
+        self._cleanup_task: asyncio.Task[None] | None = None
 
     async def initialize(self) -> None:
         logger.info("[%s] plugin initialized", PLUGIN_ID)
+        settings = self._load_settings()
+        if settings.enabled and settings.cleanup.enabled and settings.cleanup.cleanup_on_startup:
+            await self._run_cleanup(settings.cleanup, reason="startup", force=True)
 
     async def terminate(self) -> None:
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._cleanup_task
         logger.info("[%s] plugin terminated", PLUGIN_ID)
 
     def _config_get(self, key: str, default: Any) -> Any:
@@ -322,6 +343,7 @@ class VideoVisionHelper(Star):
         hint_conf = self._config_section("hint_policy")
         download_conf = self._config_section("download_policy")
         runtime_conf = self._config_section("runtime_policy")
+        cleanup_conf = self._config_section("cleanup_policy")
 
         sampling_mode = self._read_str(frame_conf.get("sampling_mode"), "uniform")
         if sampling_mode not in {"uniform", "fixed_interval", "head_tail"}:
@@ -573,6 +595,35 @@ class VideoVisionHelper(Star):
                     180,
                     minimum=0,
                     maximum=60 * 60,
+                ),
+            ),
+            cleanup=CleanupPolicy(
+                enabled=self._read_bool(cleanup_conf.get("enabled"), True),
+                cleanup_on_startup=self._read_bool(
+                    cleanup_conf.get("cleanup_on_startup"),
+                    True,
+                ),
+                cleanup_after_request=self._read_bool(
+                    cleanup_conf.get("cleanup_after_request"),
+                    True,
+                ),
+                ttl_hours=self._read_int(
+                    cleanup_conf.get("ttl_hours"),
+                    24,
+                    minimum=1,
+                    maximum=24 * 30,
+                ),
+                min_cleanup_interval_minutes=self._read_int(
+                    cleanup_conf.get("min_cleanup_interval_minutes"),
+                    30,
+                    minimum=0,
+                    maximum=24 * 60,
+                ),
+                max_files_per_run=self._read_int(
+                    cleanup_conf.get("max_files_per_run"),
+                    200,
+                    minimum=1,
+                    maximum=10000,
                 ),
             ),
         )
@@ -1130,6 +1181,108 @@ class VideoVisionHelper(Star):
     def _make_temp_path(suffix: str) -> Path:
         temp_root = Path(tempfile.gettempdir())
         return temp_root / f"{PLUGIN_ID}_{uuid.uuid4().hex}{suffix}"
+
+    @staticmethod
+    def _temp_file_prefix() -> str:
+        return f"{PLUGIN_ID}_"
+
+    @staticmethod
+    def _plugin_temp_root() -> Path:
+        return Path(tempfile.gettempdir()).resolve()
+
+    def _cleanup_expired_temp_files(self, policy: CleanupPolicy) -> tuple[int, int, int]:
+        if not policy.enabled:
+            return (0, 0, 0)
+
+        temp_root = self._plugin_temp_root()
+        ttl_seconds = policy.ttl_hours * 3600
+        now = time.time()
+        candidates: list[tuple[float, Path, int]] = []
+        scanned_count = 0
+
+        for path in temp_root.glob(f"{self._temp_file_prefix()}*"):
+            scanned_count += 1
+            try:
+                resolved_path = path.resolve()
+                if resolved_path.parent != temp_root or not resolved_path.is_file():
+                    continue
+                stat_result = resolved_path.stat()
+            except OSError as exc:
+                self._debug("failed to inspect temp file during cleanup: %s (%s)", path, exc)
+                continue
+
+            if now - stat_result.st_mtime < ttl_seconds:
+                continue
+            candidates.append((stat_result.st_mtime, resolved_path, stat_result.st_size))
+
+        candidates.sort(key=lambda item: item[0])
+        deleted_count = 0
+        deleted_bytes = 0
+
+        for _, path, size in candidates[: policy.max_files_per_run]:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                self._debug("failed to cleanup expired temp file %s: %s", path, exc)
+                continue
+            deleted_count += 1
+            deleted_bytes += size
+
+        if deleted_count > 0:
+            logger.info(
+                "[%s] cleaned up %s expired temp file(s), freed %s (scanned=%s, ttl=%sh)",
+                PLUGIN_ID,
+                deleted_count,
+                self._format_size(deleted_bytes),
+                scanned_count,
+                policy.ttl_hours,
+            )
+        else:
+            self._debug(
+                "cleanup scanned %s plugin temp file(s), no expired files found (ttl=%sh)",
+                scanned_count,
+                policy.ttl_hours,
+            )
+
+        return (deleted_count, deleted_bytes, scanned_count)
+
+    async def _run_cleanup(
+        self,
+        policy: CleanupPolicy,
+        *,
+        reason: str,
+        force: bool = False,
+    ) -> None:
+        if not policy.enabled:
+            return
+
+        now = time.monotonic()
+        min_interval_seconds = policy.min_cleanup_interval_minutes * 60
+        if not force and now - self._last_cleanup_at < min_interval_seconds:
+            self._debug(
+                "skip temp cleanup for reason=%s because interval guard is active (%s min)",
+                reason,
+                policy.min_cleanup_interval_minutes,
+            )
+            return
+
+        self._last_cleanup_at = now
+        self._debug("running temp cleanup for reason=%s", reason)
+        try:
+            await asyncio.to_thread(self._cleanup_expired_temp_files, policy)
+        except Exception as exc:
+            logger.warning("[%s] temp cleanup failed for reason=%s: %s", PLUGIN_ID, reason, exc)
+
+    def _schedule_cleanup(self, policy: CleanupPolicy, *, reason: str) -> None:
+        if not policy.enabled:
+            return
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            self._debug("skip temp cleanup scheduling for reason=%s because previous cleanup is still running", reason)
+            return
+
+        self._cleanup_task = asyncio.create_task(
+            self._run_cleanup(policy, reason=reason),
+        )
 
     @staticmethod
     def _safe_parse_float(value: Any, default: float = 0.0) -> float:
@@ -2551,6 +2704,8 @@ class VideoVisionHelper(Star):
             return
 
         if not settings.frame.enabled and settings.audio.mode == "disabled":
+            if settings.cleanup.cleanup_after_request:
+                self._schedule_cleanup(settings.cleanup, reason="request_noop")
             return
 
         self._debug(
@@ -2578,6 +2733,8 @@ class VideoVisionHelper(Star):
                         for notice in skipped_notices
                     ],
                 )
+            if settings.cleanup.cleanup_after_request:
+                self._schedule_cleanup(settings.cleanup, reason="request_no_video")
             return
 
         if len(attachments) > settings.frame.max_videos_per_request:
@@ -2617,6 +2774,8 @@ class VideoVisionHelper(Star):
         skipped_notices.extend(budget_skipped_notices)
 
         if not processed_results and not skipped_notices:
+            if settings.cleanup.cleanup_after_request:
+                self._schedule_cleanup(settings.cleanup, reason="request_empty_result")
             return
 
         removed_indices = {
@@ -2706,3 +2865,5 @@ class VideoVisionHelper(Star):
             total_segment_count,
             len(skipped_notices),
         )
+        if settings.cleanup.cleanup_after_request:
+            self._schedule_cleanup(settings.cleanup, reason="request_done")

@@ -370,5 +370,47 @@
         "hint": "填 0 表示关闭总时长限制。达到上限后，插件会停止继续抽帧、抽音频或 STT。"
       }
     }
+  },
+  "cleanup_policy": {
+    "type": "object",
+    "description": "插件临时文件清理策略",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "启用插件临时文件兜底清理",
+        "hint": "只清理系统临时目录里由本插件生成、且文件名以 astrbot_plugin_video_vision_helper_ 开头的过期文件。"
+      },
+      "cleanup_on_startup": {
+        "type": "bool",
+        "default": true,
+        "description": "插件启动时清理过期临时文件",
+        "hint": "适合清掉 AstrBot 异常退出、请求中断或系统没有及时释放时残留的插件临时文件。"
+      },
+      "cleanup_after_request": {
+        "type": "bool",
+        "default": true,
+        "description": "请求后按间隔清理过期临时文件",
+        "hint": "不会每次都强制扫描，会受到“两次自动清理的最小间隔”限制。"
+      },
+      "ttl_hours": {
+        "type": "int",
+        "default": 24,
+        "description": "临时文件保留时长（小时）",
+        "hint": "超过这个时长的插件临时文件才会被删除，默认保留 24 小时，避免误删正在处理或刚注入给模型的文件。"
+      },
+      "min_cleanup_interval_minutes": {
+        "type": "int",
+        "default": 30,
+        "description": "两次自动清理的最小间隔（分钟）",
+        "hint": "填 0 表示每次请求结束都允许尝试清理；通常保持默认即可。"
+      },
+      "max_files_per_run": {
+        "type": "int",
+        "default": 200,
+        "description": "单次清理最多删除的文件数",
+        "hint": "用于避免一次性删除太多文件导致插件启动或请求后清理耗时过长。"
+      }
+    }
   }
 }

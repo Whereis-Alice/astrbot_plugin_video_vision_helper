@@ -1,8 +1,8 @@
 name: astrbot_plugin_video_vision_helper
 display_name: 视频视觉助手
-version: 0.4.2
+version: 0.4.3
 author: Whereis-Alice
-desc: "将视频拆解为关键帧、分段音频与可选转写文本，并优化高帧数长视频抽帧速度、分段覆盖与资源预算保护"
-short_desc: "视频抽帧、长视频分段、STT 转写与分段预算保护"
+desc: "将视频拆解为关键帧、分段音频与可选转写文本，并支持长视频分段、资源预算保护与插件临时文件清理策略"
+short_desc: "视频抽帧、长视频分段、STT 转写与临时文件清理"
 astrbot_version: ">=4.16,<5"
 repo: https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper
