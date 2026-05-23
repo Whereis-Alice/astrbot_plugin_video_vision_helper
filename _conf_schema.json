@@ -32,6 +32,16 @@
         "default": 120,
         "description": "单次 FFmpeg / FFprobe 命令超时时间（秒）",
         "hint": "抽帧、抽音频和探测视频都会受到这个超时限制。"
+      },
+      "frame_seek_mode": {
+        "type": "string",
+        "default": "fast",
+        "description": "抽帧 seek 模式",
+        "hint": "`fast` 会把 -ss 放在输入前，适合高帧数抽取，速度更快但时间点可能有轻微偏移；`accurate` 会把 -ss 放在输入后，时间点更准但高帧数视频会明显更慢。",
+        "options": [
+          "fast",
+          "accurate"
+        ]
       }
     }
   },
@@ -68,19 +78,19 @@
       },
       "max_long_video_frames_per_video": {
         "type": "int",
-        "default": 16,
+        "default": 24,
         "description": "长视频最多抽取的关键帧数",
-        "hint": "这是整条长视频的总帧数预算，不会按分段数倍增。例如分 3 段且这里填 16，插件会把 16 帧分配到各段，而不是抽 30 帧。"
+        "hint": "这是整条长视频的总帧数预算，不会按分段数倍增。插件会按片段时长加权分配帧数，例如长片段分到更多帧、短片段分到更少帧。"
       },
       "max_images_per_request": {
         "type": "int",
-        "default": 24,
+        "default": 32,
         "description": "单次请求最多注入的图片数",
         "hint": "作为最后一道总量保护，避免多个视频或长视频抽帧后向上游模型注入过多图片。"
       },
       "max_total_frame_bytes_mb": {
         "type": "float",
-        "default": 10.0,
+        "default": 15.0,
         "description": "单次请求图片总体积预算（MB）",
         "hint": "填 0 表示不限制。插件会在注入 image_urls 前按抽帧顺序保留不超过预算的图片。"
       },

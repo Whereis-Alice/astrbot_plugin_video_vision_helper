@@ -62,14 +62,16 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 
 ## 长视频处理建议
 
-从 `0.4.0` 开始，插件默认启用长视频分段，但会用“总预算”保护上游模型：
+从 `0.4.1` 开始，插件默认启用长视频分段，但会用“总预算”保护上游模型：
 
 - 短视频默认最多抽取 `10` 帧：`frame_policy.max_frames_per_video = 10`
-- 长视频默认最多抽取 `16` 帧：`frame_policy.max_long_video_frames_per_video = 16`
-- 单次请求默认最多注入 `24` 张图片：`frame_policy.max_images_per_request = 24`
-- 单次请求默认图片总体积预算为 `10 MB`：`frame_policy.max_total_frame_bytes_mb = 10.0`
+- 长视频默认最多抽取 `24` 帧：`frame_policy.max_long_video_frames_per_video = 24`
+- 单次请求默认最多注入 `32` 张图片：`frame_policy.max_images_per_request = 32`
+- 单次请求默认图片总体积预算为 `15 MB`：`frame_policy.max_total_frame_bytes_mb = 15.0`
 
-重点：长视频的 `max_long_video_frames_per_video` 是整条视频的总帧数预算，不会按分段数倍增。例如长视频分成 3 段且长视频帧数填 `16`，插件会把 16 帧分配到各段，而不是抽 `10 * 3 = 30` 帧。
+重点：长视频的 `max_long_video_frames_per_video` 是整条视频的总帧数预算，不会按分段数倍增。例如长视频分成 3 段且长视频帧数填 `24`，插件会把 24 帧分配到各段，而不是抽 `10 * 3 = 30` 帧。
+
+从 `0.4.1` 开始，长视频帧数会按片段时长加权分配。比如一个 30 秒片段和一个 5 秒片段，不再平均各拿一半帧数，而是长片段拿更多、短片段拿更少，避免短尾段被过密抽帧拖慢处理。
 
 这样设计是为了兼顾 Gemini Flash、Kimi 多模态这类模型的实际承压情况：模型也许能接很多图，但聊天链路、网关、上下文预算和图片编码体积经常先成为瓶颈。默认策略选择偏稳，优先保证请求能送达、能被理解，而不是一上来堆满图片。
 
@@ -96,21 +98,24 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 默认档适合多数群聊和普通视频：
 
 - 短视频 `10` 帧
-- 长视频 `16` 帧
-- 单请求 `24` 图
-- 图片预算 `10 MB`
+- 长视频 `24` 帧
+- 单请求 `32` 图
+- 图片预算 `15 MB`
 
 如果你确认上游模型和网关都比较能扛，可以尝试增强档：
 
-- 长视频 `24` 到 `32` 帧
-- 单请求 `32` 到 `40` 图
-- 图片预算 `16` 到 `20 MB`
+- 长视频 `32` 到 `48` 帧
+- 单请求 `40` 到 `56` 图
+- 图片预算 `16` 到 `25 MB`
+- 单视频处理时长上限建议调到 `300` 秒以上
 
 如果你遇到请求失败、响应变慢、模型遗漏文字或画面，可以先降这三个配置：
 
 - `frame_policy.max_long_video_frames_per_video`
 - `frame_policy.max_images_per_request`
 - `frame_policy.max_total_frame_bytes_mb`
+
+如果日志里出现 `processing time limit was reached at stage=frame_extraction`，说明瓶颈不在模型，而在本地 FFmpeg 抽帧耗时。可以优先确认 `ffmpeg_policy.frame_seek_mode = fast`，再提高 `runtime_policy.max_processing_seconds_per_video`，或者适当降低长视频总帧数。
 
 ## STT 配置说明
 
@@ -204,7 +209,7 @@ Error processing quoted video attachment: not a valid file: 8703a2ebfa5f99dd29ce
 
 - `enabled`：插件总开关
 - `debug_logging`：调试日志开关
-- `ffmpeg_policy`：FFmpeg/FFprobe 路径和命令超时
+- `ffmpeg_policy`：FFmpeg/FFprobe 路径、命令超时和抽帧 seek 模式
 - `frame_policy`：视频数量限制、抽帧模式、短视频帧数、长视频总帧数、图片张数预算、图片总体积预算、缩放和抽帧总分析时长
 - `segment_policy`：长视频是否分段、取段方式、单段时长和分段数量
 - `audio_policy`：音频模式、采样率、音频 / STT 总分析时长、STT 失败时是否回退为仅附带音频

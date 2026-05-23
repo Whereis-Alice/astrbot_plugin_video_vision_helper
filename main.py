@@ -32,7 +32,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 
 PLUGIN_ID = "astrbot_plugin_video_vision_helper"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.4.1"
 PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u589e\u5f3a\u591a\u6a21\u6001\u89c6\u9891\u7406\u89e3"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper"
 
@@ -60,6 +60,7 @@ class FFmpegPolicy:
     ffmpeg_path: str
     ffprobe_path: str
     command_timeout_seconds: int
+    frame_seek_mode: str
 
 
 @dataclass(frozen=True)
@@ -355,6 +356,13 @@ class VideoVisionHelper(Star):
         if hint_target not in {"extra_user_content", "prompt", "system_prompt"}:
             hint_target = "extra_user_content"
 
+        frame_seek_mode = self._read_str(
+            ffmpeg_conf.get("frame_seek_mode"),
+            "fast",
+        ).strip().lower()
+        if frame_seek_mode not in {"fast", "accurate"}:
+            frame_seek_mode = "fast"
+
         return PluginSettings(
             enabled=self._read_bool(self._config_get("enabled", True), True),
             ffmpeg=FFmpegPolicy(
@@ -366,6 +374,7 @@ class VideoVisionHelper(Star):
                     minimum=5,
                     maximum=3600,
                 ),
+                frame_seek_mode=frame_seek_mode,
             ),
             frame=FramePolicy(
                 enabled=self._read_bool(frame_conf.get("enabled"), True),
@@ -384,19 +393,19 @@ class VideoVisionHelper(Star):
                 ),
                 max_long_video_frames_per_video=self._read_int(
                     frame_conf.get("max_long_video_frames_per_video"),
-                    16,
+                    24,
                     minimum=1,
                     maximum=64,
                 ),
                 max_images_per_request=self._read_int(
                     frame_conf.get("max_images_per_request"),
-                    24,
+                    32,
                     minimum=1,
                     maximum=128,
                 ),
                 max_total_frame_bytes_mb=self._read_float(
                     frame_conf.get("max_total_frame_bytes_mb"),
-                    10.0,
+                    15.0,
                     minimum=0.0,
                     maximum=256.0,
                 ),
@@ -1491,6 +1500,59 @@ class VideoVisionHelper(Star):
             for index in range(bucket_count)
         ]
 
+    @staticmethod
+    def _distribute_items_by_weights(
+        total_count: int,
+        weights: list[float],
+    ) -> list[int]:
+        if total_count <= 0 or not weights:
+            return []
+
+        positive_indices = [
+            index
+            for index, weight in enumerate(weights)
+            if weight > 0
+        ]
+        if not positive_indices:
+            return VideoVisionHelper._distribute_items(total_count, len(weights))
+
+        allocations = [0 for _ in weights]
+        if total_count <= len(positive_indices):
+            ranked_indices = sorted(
+                positive_indices,
+                key=lambda index: weights[index],
+                reverse=True,
+            )
+            for index in ranked_indices[:total_count]:
+                allocations[index] = 1
+            return allocations
+
+        for index in positive_indices:
+            allocations[index] = 1
+
+        remaining = total_count - len(positive_indices)
+        total_weight = sum(weights[index] for index in positive_indices)
+        raw_shares = [
+            (
+                index,
+                remaining * weights[index] / total_weight,
+            )
+            for index in positive_indices
+        ]
+        for index, raw_share in raw_shares:
+            allocations[index] += int(math.floor(raw_share))
+
+        assigned = sum(allocations)
+        leftover = total_count - assigned
+        ranked_remainders = sorted(
+            raw_shares,
+            key=lambda item: item[1] - math.floor(item[1]),
+            reverse=True,
+        )
+        for index, _raw_share in ranked_remainders[:leftover]:
+            allocations[index] += 1
+        return allocations
+
     def _run_command(
         self,
         command: list[str],
@@ -1657,16 +1719,27 @@ class VideoVisionHelper(Star):
         ffmpeg_policy: FFmpegPolicy,
         timeout_seconds: int | None = None,
     ) -> bool:
-        command = [
+        base_args = [
             ffmpeg_policy.ffmpeg_path,
             "-hide_banner",
             "-loglevel",
             "error",
             "-y",
+        ]
+        input_args = [
             "-i",
             str(video_path),
-            "-ss",
-            f"{timestamp_seconds:.3f}",
+        ]
+        if ffmpeg_policy.frame_seek_mode == "fast":
+            # Fast seek is much cheaper for many independent frame extractions.
+            input_args = [
+                "-ss",
+                f"{timestamp_seconds:.3f}",
+                "-i",
+                str(video_path),
+            ]
+
+        output_args = [
             "-frames:v",
             "1",
             "-vf",
@@ -1677,6 +1750,13 @@ class VideoVisionHelper(Star):
             "yuvj420p",
             str(output_path),
         ]
+        if ffmpeg_policy.frame_seek_mode == "accurate":
+            output_args = [
+                "-ss",
+                f"{timestamp_seconds:.3f}",
+                *output_args,
+            ]
+        command = [*base_args, *input_args, *output_args]
         try:
             result = self._run_command(
                 command,
@@ -2218,9 +2298,21 @@ class VideoVisionHelper(Star):
                 settings.frame.max_long_video_frames_per_video,
                 len(frame_segments),
             )
-            frame_distribution = self._distribute_items(
+            frame_distribution = self._distribute_items_by_weights(
                 effective_frame_budget,
-                len(frame_segments),
+                [segment.duration_seconds for segment in frame_segments],
+            )
+            self._debug(
+                "frame distribution for %s: %s",
+                attachment.path,
+                [
+                    {
+                        "label": segment.label,
+                        "duration": segment.duration_seconds,
+                        "frames": frame_count,
+                    }
+                    for segment, frame_count in zip(frame_segments, frame_distribution)
+                ],
             )
             seen_timestamps: set[float] = set()
             for segment, segment_frame_count in zip(frame_segments, frame_distribution):
