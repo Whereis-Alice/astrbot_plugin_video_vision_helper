@@ -32,7 +32,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 
 PLUGIN_ID = "astrbot_plugin_video_vision_helper"
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.4.2"
 PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u589e\u5f3a\u591a\u6a21\u6001\u89c6\u9891\u7406\u89e3"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper"
 
@@ -1416,6 +1416,38 @@ class VideoVisionHelper(Star):
 
         return self._sample_uniform_positions(0.0, max_start, segment_count)
 
+    @staticmethod
+    def _build_contiguous_video_segments(
+        total_duration: float,
+        coverage_budget: float,
+        segment_duration: float,
+        segment_count: int,
+    ) -> list[VideoSegment]:
+        segments: list[VideoSegment] = []
+        cursor = 0.0
+        remaining_budget = coverage_budget
+        for index in range(1, segment_count + 1):
+            if cursor >= total_duration or remaining_budget <= 0:
+                break
+            actual_duration = min(
+                segment_duration,
+                total_duration - cursor,
+                remaining_budget,
+            )
+            if actual_duration <= 0:
+                break
+            segments.append(
+                VideoSegment(
+                    index=index,
+                    start_seconds=round(cursor, 3),
+                    duration_seconds=round(actual_duration, 3),
+                    label=f"\u7247\u6bb5 {index}",
+                ),
+            )
+            cursor += actual_duration
+            remaining_budget -= actual_duration
+        return segments
+
     def _build_video_segments(
         self,
         duration_seconds: float,
@@ -1447,6 +1479,18 @@ class VideoVisionHelper(Star):
             policy.max_segments_per_video,
             max(1, int(math.ceil(coverage_budget / max(segment_duration, 0.001)))),
         )
+        full_cover_segment_count = int(math.ceil(total_duration / max(segment_duration, 0.001)))
+        if (
+            coverage_budget >= total_duration
+            and segment_count >= full_cover_segment_count
+        ):
+            return self._build_contiguous_video_segments(
+                total_duration,
+                coverage_budget,
+                segment_duration,
+                segment_count,
+            )
+
         starts = self._build_segment_start_positions(
             total_duration,
             segment_duration,
