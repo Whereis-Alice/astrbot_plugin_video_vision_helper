@@ -120,6 +120,7 @@ Error processing quoted video attachment: not a valid file: 8703a2ebfa5f99dd29ce
 `0.2.1` 之后，插件会：
 
 - 优先尝试 `path`、`file:///`、已有本地文件、AstrBot 临时目录候选路径
+- 对 `aiocqhttp` / OneBot V11 引用视频，额外回查 reply 原始消息并尝试使用 `url` 下载视频
 - 避免对 quoted video 再额外刷一条重复 warning
 - 把更多细节放到 `debug_logging` 里，方便继续定位是哪个平台适配器返回了不完整媒体路径
 

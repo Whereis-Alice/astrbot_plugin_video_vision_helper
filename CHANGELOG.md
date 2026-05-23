@@ -1,5 +1,12 @@
 # 更新日志
 
+## 0.2.2 - 2026-05-23
+
+- 新增 aiocqhttp / OneBot V11 的 quoted video 原始 reply 回查兜底
+- 当 `Reply.chain` 里的 `Video` 只剩裸文件名时，插件会主动调用 `get_msg` 再解析原始 video segment
+- 如果原始 video segment 带有可访问的 `url`，插件会自动下载引用视频后继续处理
+- 更新 README 与版本元数据
+
 ## 0.2.1 - 2026-05-23
 
 - 新增 `debug_logging` 配置开关，支持输出更细的插件级 debug 日志

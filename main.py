@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -27,10 +28,11 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import TextPart
 from astrbot.core.message.components import Reply, Video
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+from astrbot.core.utils.io import download_file
 
 
 PLUGIN_ID = "astrbot_plugin_video_vision_helper"
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.2.2"
 PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u589e\u5f3a\u591a\u6a21\u6001\u89c6\u9891\u7406\u89e3"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper"
 
@@ -414,6 +416,190 @@ class VideoVisionHelper(Star):
 
         return candidates
 
+    @staticmethod
+    def _safe_event_get(event_like: Any, key: str, default: Any = None) -> Any:
+        if isinstance(event_like, dict):
+            return event_like.get(key, default)
+        getter = getattr(event_like, "get", None)
+        if callable(getter):
+            try:
+                return getter(key, default)
+            except Exception:
+                pass
+        return getattr(event_like, key, default)
+
+    @staticmethod
+    def _extract_onebot_segments(event_like: Any) -> list[Any]:
+        segments = VideoVisionHelper._safe_event_get(event_like, "message", [])
+        return list(segments) if isinstance(segments, list) else []
+
+    def _extract_reply_ids_from_raw_event(self, raw_event: Any) -> list[str]:
+        reply_ids: list[str] = []
+        for segment in self._extract_onebot_segments(raw_event):
+            if self._safe_event_get(segment, "type", "") != "reply":
+                continue
+            data = self._safe_event_get(segment, "data", {})
+            reply_id = self._read_str(self._safe_event_get(data, "id", ""), "")
+            if reply_id:
+                reply_ids.append(reply_id)
+        return reply_ids
+
+    def _collect_video_path_candidates_from_mapping(
+        self,
+        payload: dict[str, Any],
+    ) -> list[Path]:
+        temp_roots = [
+            Path(get_astrbot_temp_path()),
+            Path(tempfile.gettempdir()),
+        ]
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for field_name in ("path", "file", "name", "file_name"):
+            raw_value = payload.get(field_name)
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                continue
+            normalized = self._strip_file_scheme(raw_value.strip())
+            lowered = normalized.lower()
+            if lowered.startswith("http://") or lowered.startswith("https://"):
+                continue
+            raw_path = Path(normalized)
+            path_variants = [raw_path]
+            if not raw_path.is_absolute():
+                path_variants.append(Path.cwd() / raw_path)
+                for root in temp_roots:
+                    path_variants.append(root / raw_path)
+                if raw_path.name:
+                    for root in temp_roots:
+                        path_variants.append(root / raw_path.name)
+            for candidate in path_variants:
+                key = str(candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(candidate)
+        return candidates
+
+    def _guess_video_name_from_mapping(self, payload: dict[str, Any]) -> str:
+        for field_name in ("file_name", "name", "file"):
+            value = payload.get(field_name)
+            if isinstance(value, str) and value.strip():
+                return Path(self._strip_file_scheme(value.strip())).name
+        url = payload.get("url")
+        if isinstance(url, str) and url.strip():
+            parsed = urlparse(url.strip())
+            if parsed.path:
+                return Path(parsed.path).name or f"{uuid.uuid4().hex}.mp4"
+        return f"{uuid.uuid4().hex}.mp4"
+
+    async def _download_video_from_url(
+        self,
+        event: AstrMessageEvent,
+        url: str,
+        suggested_name: str,
+    ) -> Path | None:
+        parsed = urlparse(url)
+        suffix = Path(parsed.path).suffix or Path(suggested_name).suffix or ".mp4"
+        output_path = self._make_temp_path(suffix)
+        self._debug("downloading quoted video from url=%s to path=%s", url, output_path)
+        try:
+            await download_file(url, str(output_path))
+        except Exception as exc:
+            logger.warning("[%s] failed to download quoted video from %s: %s", PLUGIN_ID, url, exc)
+            output_path.unlink(missing_ok=True)
+            return None
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            output_path.unlink(missing_ok=True)
+            self._debug("downloaded quoted video is empty: %s", output_path)
+            return None
+        self._track_temp_file(event, output_path)
+        return output_path
+
+    async def _resolve_onebot_video_segment(
+        self,
+        event: AstrMessageEvent,
+        payload: dict[str, Any],
+        *,
+        quoted: bool,
+    ) -> VideoAttachment | None:
+        candidates = self._collect_video_path_candidates_from_mapping(payload)
+        url = self._read_str(payload.get("url"), "")
+        name = self._guess_video_name_from_mapping(payload)
+        self._debug(
+            "resolving raw onebot %s video payload=%s candidates=%s",
+            "quoted" if quoted else "direct",
+            payload,
+            [str(candidate) for candidate in candidates],
+        )
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                resolved = candidate.resolve()
+                self._debug("resolved raw onebot video via local candidate: %s", resolved)
+                return VideoAttachment(name=name or resolved.name, path=resolved, quoted=quoted)
+
+        if url.startswith("http://") or url.startswith("https://"):
+            downloaded_path = await self._download_video_from_url(event, url, name)
+            if downloaded_path is not None:
+                return VideoAttachment(
+                    name=name or downloaded_path.name,
+                    path=downloaded_path,
+                    quoted=quoted,
+                )
+
+        return None
+
+    async def _collect_aiocqhttp_reply_video_attachments(
+        self,
+        event: AstrMessageEvent,
+        seen_paths: set[str],
+    ) -> list[VideoAttachment]:
+        bot = getattr(event, "bot", None)
+        raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if bot is None or raw_message is None:
+            return []
+
+        reply_ids = self._extract_reply_ids_from_raw_event(raw_message)
+        if not reply_ids:
+            return []
+        self._debug("aiocqhttp raw reply ids for quoted video fallback: %s", reply_ids)
+
+        attachments: list[VideoAttachment] = []
+        for reply_id in reply_ids:
+            try:
+                reply_event_data = await bot.call_action(
+                    action="get_msg",
+                    message_id=int(reply_id),
+                )
+            except Exception as exc:
+                self._debug("aiocqhttp get_msg failed for reply id=%s: %s", reply_id, exc)
+                continue
+
+            for segment in self._extract_onebot_segments(reply_event_data):
+                if self._safe_event_get(segment, "type", "") != "video":
+                    continue
+                payload = self._safe_event_get(segment, "data", {})
+                if not isinstance(payload, dict):
+                    continue
+                attachment = await self._resolve_onebot_video_segment(
+                    event,
+                    payload,
+                    quoted=True,
+                )
+                if attachment is None:
+                    continue
+                key = str(attachment.path)
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                attachments.append(attachment)
+
+        if attachments:
+            self._debug(
+                "collected %s quoted video attachment(s) from aiocqhttp raw reply fallback",
+                len(attachments),
+            )
+        return attachments
+
     async def _resolve_video_component_path(
         self,
         video: Video,
@@ -566,10 +752,15 @@ class VideoVisionHelper(Star):
                     key = str(path)
                     if key not in seen_paths:
                         seen_paths.add(key)
-                        attachments.append(
-                            VideoAttachment(name=path.name, path=path, quoted=True),
-                        )
+                    attachments.append(
+                        VideoAttachment(name=path.name, path=path, quoted=True),
+                    )
 
+        aiocqhttp_reply_attachments = await self._collect_aiocqhttp_reply_video_attachments(
+            event,
+            seen_paths,
+        )
+        attachments.extend(aiocqhttp_reply_attachments)
         self._debug("collected %s video attachment(s) from event fallback", len(attachments))
         return attachments
 
