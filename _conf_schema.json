@@ -2,58 +2,58 @@
   "enabled": {
     "type": "bool",
     "default": true,
-    "description": "?? Video Vision Helper",
-    "hint": "?????? AstrBot ????????????"
+    "description": "启用 Video Vision Helper",
+    "hint": "关闭后将保持 AstrBot 默认的视频附件处理方式。"
   },
   "debug_logging": {
     "type": "bool",
     "default": false,
-    "description": "???? Debug ??",
-    "hint": "????????????????????STT ???????? quoted video ???????????????"
+    "description": "启用插件 Debug 日志",
+    "hint": "打开后会输出更详细的视频解析、分段规划、STT 选路、提示注入和 quoted video 路径解析信息，适合排错时使用。"
   },
   "ffmpeg_policy": {
     "type": "object",
-    "description": "FFmpeg ????",
+    "description": "FFmpeg 执行策略",
     "items": {
       "ffmpeg_path": {
         "type": "string",
         "default": "ffmpeg",
-        "description": "FFmpeg ?????",
-        "hint": "??? PATH ??? ffmpeg?"
+        "description": "FFmpeg 可执行路径",
+        "hint": "默认从 PATH 中查找 ffmpeg。"
       },
       "ffprobe_path": {
         "type": "string",
         "default": "ffprobe",
-        "description": "FFprobe ?????",
-        "hint": "??? PATH ??? ffprobe?"
+        "description": "FFprobe 可执行路径",
+        "hint": "默认从 PATH 中查找 ffprobe。"
       },
       "command_timeout_seconds": {
         "type": "int",
         "default": 120,
-        "description": "?? FFmpeg / FFprobe ?????????",
-        "hint": "??????????????????????"
+        "description": "单次 FFmpeg / FFprobe 命令超时时间（秒）",
+        "hint": "抽帧、抽音频和探测视频都会受到这个超时限制。"
       }
     }
   },
   "frame_policy": {
     "type": "object",
-    "description": "???????",
+    "description": "关键帧抽取策略",
     "items": {
       "enabled": {
         "type": "bool",
         "default": true,
-        "description": "??????"
+        "description": "启用视频抽帧"
       },
       "max_videos_per_request": {
         "type": "int",
         "default": 2,
-        "description": "????????????"
+        "description": "单次请求最多处理的视频数"
       },
       "sampling_mode": {
         "type": "string",
         "default": "uniform",
-        "description": "????",
-        "hint": "`uniform` ????????????`fixed_interval` ????????`head_tail` ?????????????",
+        "description": "抽帧模式",
+        "hint": "`uniform` 会尽量均匀覆盖分析范围，`fixed_interval` 按固定间隔抽帧，`head_tail` 会优先照顾开头和结尾镜头。",
         "options": [
           "uniform",
           "fixed_interval",
@@ -63,47 +63,47 @@
       "max_frames_per_video": {
         "type": "int",
         "default": 6,
-        "description": "?????????????"
+        "description": "每个视频最多抽取的关键帧数"
       },
       "fixed_interval_seconds": {
         "type": "float",
         "default": 2.0,
-        "description": "?????????",
-        "hint": "?? `sampling_mode = fixed_interval` ????"
+        "description": "固定间隔抽帧的秒数",
+        "hint": "仅在 `sampling_mode = fixed_interval` 时生效。"
       },
       "max_side": {
         "type": "int",
         "default": 768,
-        "description": "???????????"
+        "description": "抽取后单帧的最长边上限"
       },
       "jpeg_quality": {
         "type": "int",
         "default": 90,
-        "description": "JPEG ??",
-        "hint": "???? 70 ? 95???????"
+        "description": "JPEG 质量",
+        "hint": "范围建议 70 到 95，越高越清晰。"
       },
       "max_video_duration_seconds": {
         "type": "int",
         "default": 30,
-        "description": "???????????????????",
-        "hint": "??????????????????????? `segment_policy` ???????????????????"
+        "description": "单个视频用于抽帧的总分析时长预算（秒）",
+        "hint": "未启用分段时表示从视频开头最多分析多少秒；启用 `segment_policy` 后表示抽帧总共最多覆盖多少秒视频内容。"
       }
     }
   },
   "segment_policy": {
     "type": "object",
-    "description": "???????",
+    "description": "长视频分段策略",
     "items": {
       "enabled": {
         "type": "bool",
         "default": false,
-        "description": "???????"
+        "description": "启用长视频分段"
       },
       "selection_mode": {
         "type": "string",
         "default": "uniform",
-        "description": "??????",
-        "hint": "`head_only` ???????`uniform` ?????????????`head_tail` ?????????",
+        "description": "分段选择模式",
+        "hint": "`head_only` 从头顺序取段，`uniform` 在整段视频里尽量均匀取段，`head_tail` 优先取开头和结尾。",
         "options": [
           "head_only",
           "uniform",
@@ -113,30 +113,30 @@
       "segment_duration_seconds": {
         "type": "int",
         "default": 30,
-        "description": "???????????"
+        "description": "单个分析片段时长（秒）"
       },
       "max_segments_per_video": {
         "type": "int",
         "default": 4,
-        "description": "???????????????"
+        "description": "单个视频最多切分并处理的片段数"
       },
       "min_video_duration_seconds": {
         "type": "int",
         "default": 45,
-        "description": "??????????????",
-        "hint": "??????????????????"
+        "description": "超过这个时长才开始分段（秒）",
+        "hint": "短视频通常没必要切段，避免额外拆分。"
       }
     }
   },
   "audio_policy": {
     "type": "object",
-    "description": "??????",
+    "description": "音频处理策略",
     "items": {
       "mode": {
         "type": "string",
         "default": "attach",
-        "description": "??????",
-        "hint": "`attach` ???????????`stt` ???????????`attach_and_stt` ??????",
+        "description": "音频处理模式",
+        "hint": "`attach` 适合能理解音频的模型，`stt` 适合不支持音频的模型，`attach_and_stt` 会两者都做。",
         "options": [
           "disabled",
           "attach",
@@ -147,31 +147,31 @@
       "sample_rate": {
         "type": "int",
         "default": 16000,
-        "description": "????????"
+        "description": "抽取音频的采样率"
       },
       "max_audio_duration_seconds": {
         "type": "int",
         "default": 90,
-        "description": "?????????? / STT ???????????",
-        "hint": "????????????????????????? `segment_policy` ???????????????????"
+        "description": "单个视频用于音频提取 / STT 的总分析时长预算（秒）",
+        "hint": "未启用分段时表示从视频开头最多提取多少秒音频；启用 `segment_policy` 后表示音频总共最多覆盖多少秒视频内容。"
       },
       "fallback_to_attachment_on_stt_failure": {
         "type": "bool",
         "default": true,
-        "description": "STT ?????????????",
-        "hint": "?? `mode = stt` ? `mode = attach_and_stt` ?????"
+        "description": "STT 失败时是否回退到仅附带音频",
+        "hint": "仅在 `mode = stt` 或 `mode = attach_and_stt` 时有意义。"
       }
     }
   },
   "stt_policy": {
     "type": "object",
-    "description": "??????",
+    "description": "音频转写策略",
     "items": {
       "backend": {
         "type": "string",
         "default": "disabled",
-        "description": "STT ??",
-        "hint": "`astrbot_configured` ????? AstrBot ???? STT ????`openai_compatible` ?????????????",
+        "description": "STT 后端",
+        "hint": "`astrbot_configured` 会直接使用 AstrBot 已配置的 STT 供应商，`openai_compatible` 则走插件自定义的转写接口。",
         "options": [
           "disabled",
           "astrbot_configured",
@@ -181,77 +181,77 @@
       "astrbot_provider_id": {
         "type": "string",
         "default": "",
-        "description": "AstrBot STT ??? ID????",
-        "hint": "?? `backend = astrbot_configured` ?????????????? AstrBot ?? STT ????????????? provider id?"
+        "description": "AstrBot STT 供应商 ID（可选）",
+        "hint": "仅在 `backend = astrbot_configured` 时生效。不填则跟随当前会话或 AstrBot 默认 STT 配置，填写后会强制使用指定 provider id。"
       },
       "endpoint": {
         "type": "string",
         "default": "",
-        "description": "??????",
-        "hint": "?? `backend = openai_compatible` ?????? `/audio/transcriptions` ????????? `/v1` ????"
+        "description": "转写接口地址",
+        "hint": "仅在 `backend = openai_compatible` 时生效。可填 `/audio/transcriptions` 完整端点，也可填到 `/v1` 这一层。"
       },
       "api_key": {
         "type": "string",
         "default": "",
         "description": "STT API Key",
-        "hint": "?? `backend = openai_compatible` ????"
+        "hint": "仅在 `backend = openai_compatible` 时生效。"
       },
       "model": {
         "type": "string",
         "default": "",
-        "description": "???? ID",
-        "hint": "?? `backend = openai_compatible` ????"
+        "description": "转写模型 ID",
+        "hint": "仅在 `backend = openai_compatible` 时生效。"
       },
       "language": {
         "type": "string",
         "default": "",
-        "description": "????",
-        "hint": "?? `backend = openai_compatible` ?????? `zh` ? `en`????????????"
+        "description": "转写语言",
+        "hint": "仅在 `backend = openai_compatible` 时生效。例如 `zh` 或 `en`，不填则由后端自动判断。"
       },
       "prompt": {
         "type": "text",
         "default": "",
-        "description": "???????",
-        "hint": "?? `backend = openai_compatible` ????????????????????????"
+        "description": "额外转写提示词",
+        "hint": "仅在 `backend = openai_compatible` 时生效。可用于强化领域词汇、专有名词或转写风格。"
       },
       "temperature": {
         "type": "float",
         "default": 0.0,
         "description": "STT temperature",
-        "hint": "?? `backend = openai_compatible` ????"
+        "hint": "仅在 `backend = openai_compatible` 时生效。"
       },
       "timeout_seconds": {
         "type": "int",
         "default": 120,
-        "description": "STT ?????????",
-        "hint": "?? `backend = openai_compatible` ??? HTTP ???????"
+        "description": "STT 请求超时时间（秒）",
+        "hint": "仅在 `backend = openai_compatible` 时作为 HTTP 请求超时使用。"
       },
       "max_transcript_chars": {
         "type": "int",
         "default": 1200,
-        "description": "?????????????"
+        "description": "单个片段转写最大保留字符数"
       },
       "max_total_transcript_chars": {
         "type": "int",
         "default": 2400,
-        "description": "?????????????????",
-        "hint": "??????????????????????????????????????"
+        "description": "单个视频全部转写总共最大保留字符数",
+        "hint": "启用分段后，插件会先限制每段长度，再限制整条视频的总转写长度，避免提示过长。"
       }
     }
   },
   "hint_policy": {
     "type": "object",
-    "description": "??????",
+    "description": "提示注入策略",
     "items": {
       "enabled": {
         "type": "bool",
         "default": true,
-        "description": "????????"
+        "description": "启用视频说明提示"
       },
       "target": {
         "type": "string",
         "default": "extra_user_content",
-        "description": "??????",
+        "description": "提示注入位置",
         "options": [
           "extra_user_content",
           "prompt",
@@ -261,66 +261,66 @@
       "remove_raw_video_marker_after_processing": {
         "type": "bool",
         "default": true,
-        "description": "??????? AstrBot Core ???????????"
+        "description": "处理成功后移除 AstrBot Core 生成的原始视频路径提示"
       },
       "summary_template": {
         "type": "text",
-        "default": "[????] ??????? {video_count} ????????? {segment_count} ???????? {frame_count} ????{audio_note}{transcript_note}??????? {coverage_seconds:.1f} ?????????????????????????",
-        "description": "???????????",
-        "hint": "??? {video_count} {segment_count} {frame_count} {coverage_seconds} {audio_note} {transcript_note} ????"
+        "default": "[系统提示] 本次用户发送了 {video_count} 个视频，插件已覆盖 {segment_count} 个分析片段并抽取 {frame_count} 张关键帧{audio_note}{transcript_note}，总分析时长约 {coverage_seconds:.1f} 秒。请综合画面、字幕、动作和音频线索理解视频内容。",
+        "description": "整次请求的总览提示模板",
+        "hint": "可使用 {video_count} {segment_count} {frame_count} {coverage_seconds} {audio_note} {transcript_note} 占位符。"
       },
       "video_template": {
         "type": "text",
-        "default": "[????][{video_name}] ?? {segment_count} ?????? {frame_count} ????{audio_note}{transcript_note}?????? {coverage_seconds:.1f} ??",
-        "description": "????????",
-        "hint": "??? {video_name} {segment_count} {frame_count} {coverage_seconds} {audio_note} {transcript_note} ????"
+        "default": "[视频分析][{video_name}] 覆盖 {segment_count} 个片段，抽取 {frame_count} 张关键帧{audio_note}{transcript_note}，分析时长约 {coverage_seconds:.1f} 秒。",
+        "description": "单条视频说明模板",
+        "hint": "可使用 {video_name} {segment_count} {frame_count} {coverage_seconds} {audio_note} {transcript_note} 占位符。"
       },
       "transcript_template": {
         "type": "text",
-        "default": "[??????][{video_name}] ? {segment_count} ????\n{transcript}",
-        "description": "??????????",
-        "hint": "??? {video_name} {segment_count} {transcript} ????"
+        "default": "[视频音频转写][{video_name}] 共 {segment_count} 个片段：\n{transcript}",
+        "description": "单条视频整体转写模板",
+        "hint": "可使用 {video_name} {segment_count} {transcript} 占位符。"
       },
       "transcript_segment_template": {
         "type": "text",
         "default": "- {segment_label} ({start_seconds:.1f}s-{end_seconds:.1f}s): {transcript}",
-        "description": "????????",
-        "hint": "??? {segment_label} {start_seconds} {end_seconds} {transcript} ????"
+        "description": "单个分段转写模板",
+        "hint": "可使用 {segment_label} {start_seconds} {end_seconds} {transcript} 占位符。"
       }
     }
   },
   "download_policy": {
     "type": "object",
-    "description": "????????",
+    "description": "远程下载保护策略",
     "items": {
       "quoted_video_download_enabled": {
         "type": "bool",
         "default": true,
-        "description": "??? quoted video ??? URL ????",
-        "hint": "???? OneBot / aiocqhttp ?????? `url` ?????????????"
+        "description": "允许从 quoted video 的远程 URL 下载文件",
+        "hint": "主要用于 OneBot / aiocqhttp 等平台只返回 `url` 而没有本地绝对路径的场景。"
       },
       "max_download_size_mb": {
         "type": "float",
         "default": 64.0,
-        "description": "?????????????MB?",
-        "hint": "? 0 ?????????????????? `content-length` ????????"
+        "description": "单个远程视频最大下载体积（MB）",
+        "hint": "填 0 表示不限制。插件会同时检查响应头里的 `content-length` 和实际下载过程。"
       },
       "timeout_seconds": {
         "type": "int",
         "default": 120,
-        "description": "???????????????"
+        "description": "单个远程视频下载超时时间（秒）"
       }
     }
   },
   "runtime_policy": {
     "type": "object",
-    "description": "????????",
+    "description": "处理耗时保护策略",
     "items": {
       "max_processing_seconds_per_video": {
         "type": "int",
         "default": 180,
-        "description": "?????????????????",
-        "hint": "? 0 ?????????????????????????????? STT?"
+        "description": "单个视频允许的总处理时长上限（秒）",
+        "hint": "填 0 表示关闭总时长限制。达到上限后，插件会停止继续抽帧、抽音频或 STT。"
       }
     }
   }
