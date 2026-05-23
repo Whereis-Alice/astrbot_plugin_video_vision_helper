@@ -1,5 +1,14 @@
 # 更新日志
 
+## 0.4.0 - 2026-05-24
+
+- 新增 `frame_policy.max_long_video_frames_per_video`，长视频最多抽取帧数可独立配置，且作为整条长视频的总帧数预算，不按分段数倍增
+- 新增 `frame_policy.max_images_per_request` 和 `frame_policy.max_total_frame_bytes_mb`，在注入 `image_urls` 前按图片张数和总体积做最终保护
+- 新增超限 / 下载失败 / 处理失败 / 图片预算不足时的中文兜底提示，避免模型侧误以为用户没有发送视频
+- 新增 `stt_policy.log_transcript_preview` 和 `stt_policy.transcript_preview_chars`，可在 Debug 日志中查看转写预览，默认关闭以保护隐私
+- 调整默认策略：长视频分段默认开启、抽帧分析时长预算默认 90 秒、远程视频下载上限默认 128 MB
+- 更新 README、配置 schema 与插件元数据
+
 ## 0.3.1 - 2026-05-24
 
 - 将 `frame_policy.max_frames_per_video` 的默认值从 `6` 提升到 `10`

@@ -6,7 +6,7 @@
 - 可选抽取音频并写入 `audio_urls`
 - 可选执行 STT，把转写文本注入到提示中
 
-这个插件是对 `astrbot_plugin_gif_vision_helper` 思路的延伸版本，目标是让暂时没有原生视频输入能力的模型，也能更稳定地理解视频里的动作、场景变化、字幕和语音线索。
+这个插件是对原作者 Yanlyn 的 [astrbot_plugin_gif_vision_helper](https://github.com/Yanlyn/astrbot_plugin_gif_vision_helper) 思路的延伸版本，目标是让暂时没有原生视频输入能力的模型，也能更稳定地理解视频里的动作、场景变化、字幕和语音线索。
 
 ## 工作方式
 
@@ -32,7 +32,11 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 - 支持单段转写长度和单视频总转写长度限制
 - 支持 quoted video 远程下载体积限制与超时保护
 - 支持单视频总处理时长上限，避免抽帧、抽音频和 STT 无限拖长
+- 支持短视频帧数与长视频总帧数独立配置，避免长视频按分段数无限放大图片量
+- 支持单次请求图片张数上限和图片总体积预算，降低上游多模态模型压力
+- 支持视频被跳过时注入明确兜底提示，方便模型知道用户确实发过视频
 - 支持 `debug_logging` 调试开关，便于排查视频解析和 STT 问题
+- 支持可选记录 STT 转写预览到 Debug 日志，排错时更容易确认音频是否识别正确
 - 支持把说明提示注入到 `extra_user_content`、`prompt` 或 `system_prompt`
 - 成功处理后可移除 AstrBot Core 注入的原始视频路径提示
 
@@ -58,13 +62,16 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 
 ## 长视频处理建议
 
-默认情况下，插件依旧偏向“从前往后分析前一段内容”，这样最稳，也最接近之前版本的行为。
+从 `0.4.0` 开始，插件默认启用长视频分段，但会用“总预算”保护上游模型：
 
-从 `0.3.1` 开始，插件默认会为每个视频抽取 `10` 帧，而不是之前的 `6` 帧。对大多数普通聊天场景来说，这个默认值会更容易看清镜头变化、动作连续性和字幕切换。
+- 短视频默认最多抽取 `10` 帧：`frame_policy.max_frames_per_video = 10`
+- 长视频默认最多抽取 `16` 帧：`frame_policy.max_long_video_frames_per_video = 16`
+- 单次请求默认最多注入 `24` 张图片：`frame_policy.max_images_per_request = 24`
+- 单次请求默认图片总体积预算为 `10 MB`：`frame_policy.max_total_frame_bytes_mb = 10.0`
 
-如果你希望插件不要只盯着视频开头，可以打开：
+重点：长视频的 `max_long_video_frames_per_video` 是整条视频的总帧数预算，不会按分段数倍增。例如长视频分成 3 段且长视频帧数填 `16`，插件会把 16 帧分配到各段，而不是抽 `10 * 3 = 30` 帧。
 
-- `segment_policy.enabled = true`
+这样设计是为了兼顾 Gemini Flash、Kimi 多模态这类模型的实际承压情况：模型也许能接很多图，但聊天链路、网关、上下文预算和图片编码体积经常先成为瓶颈。默认策略选择偏稳，优先保证请求能送达、能被理解，而不是一上来堆满图片。
 
 常见搭配：
 
@@ -77,9 +84,33 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 - `segment_policy.segment_duration_seconds`：每段看多长
 - `segment_policy.max_segments_per_video`：最多看几段
 - `frame_policy.max_video_duration_seconds`：抽帧总预算
+- `frame_policy.max_long_video_frames_per_video`：长视频总抽帧数预算
+- `frame_policy.max_images_per_request`：单次请求最终最多注入多少张图片
+- `frame_policy.max_total_frame_bytes_mb`：单次请求最终注入图片的总体积预算
 - `audio_policy.max_audio_duration_seconds`：音频 / STT 总预算
 
 也就是说，启用分段后，不再只是“截前 N 秒”，而是在预算内把多个片段分散到整条视频里处理。
+
+### 推荐档位
+
+默认档适合多数群聊和普通视频：
+
+- 短视频 `10` 帧
+- 长视频 `16` 帧
+- 单请求 `24` 图
+- 图片预算 `10 MB`
+
+如果你确认上游模型和网关都比较能扛，可以尝试增强档：
+
+- 长视频 `24` 到 `32` 帧
+- 单请求 `32` 到 `40` 图
+- 图片预算 `16` 到 `20 MB`
+
+如果你遇到请求失败、响应变慢、模型遗漏文字或画面，可以先降这三个配置：
+
+- `frame_policy.max_long_video_frames_per_video`
+- `frame_policy.max_images_per_request`
+- `frame_policy.max_total_frame_bytes_mb`
 
 ## STT 配置说明
 
@@ -124,12 +155,14 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 - quoted video 的 `file` / `path` / 候选本地路径
 - FFprobe 识别结果、抽帧时间点、音频提取结果
 - AstrBot STT provider 的选路结果
+- 可选输出 STT 转写文本预览
 - 提示注入的位置和数量
 
 注意：
 
 - 这些是插件自己的 `debug` 级日志
 - 如果你的 AstrBot 全局日志级别没有显示 `debug`，需要同时确认主程序日志设置允许输出 `debug`
+- 转写预览可能包含用户语音内容，默认关闭；排错时可以同时打开 `debug_logging = true` 和 `stt_policy.log_transcript_preview = true`
 
 ## 关于 quoted video 报错
 
@@ -172,19 +205,20 @@ Error processing quoted video attachment: not a valid file: 8703a2ebfa5f99dd29ce
 - `enabled`：插件总开关
 - `debug_logging`：调试日志开关
 - `ffmpeg_policy`：FFmpeg/FFprobe 路径和命令超时
-- `frame_policy`：视频数量限制、抽帧模式、帧数、缩放和抽帧总分析时长
+- `frame_policy`：视频数量限制、抽帧模式、短视频帧数、长视频总帧数、图片张数预算、图片总体积预算、缩放和抽帧总分析时长
 - `segment_policy`：长视频是否分段、取段方式、单段时长和分段数量
 - `audio_policy`：音频模式、采样率、音频 / STT 总分析时长、STT 失败时是否回退为仅附带音频
-- `stt_policy`：STT 后端选择、AstrBot provider 绑定、自定义转写接口、语言、单段转写长度和整条视频总转写长度限制
-- `hint_policy`：说明提示的注入位置，以及总览 / 单视频 / 分段转写模板
+- `stt_policy`：STT 后端选择、AstrBot provider 绑定、自定义转写接口、语言、单段转写长度、整条视频总转写长度限制和可选转写预览日志
+- `hint_policy`：说明提示的注入位置，以及总览 / 单视频 / 分段转写 / 跳过视频模板
 - `download_policy`：quoted video 远程下载开关、下载体积限制和超时
 - `runtime_policy`：单视频总处理时长限制
 
 ## 已知限制
 
 - 这不是原生视频理解，而是“抽帧 + 可选音频 + 可选转写”的补偿方案
-- 默认仍然偏向稳妥处理；如果不启用 `segment_policy`，长视频依旧主要分析开头部分
+- 默认仍然偏向稳妥处理；长视频会分段覆盖，但会受到长视频总帧数、单请求图片数和图片总体积预算限制
 - 即使启用分段，也仍然会受到帧数、音频总时长、转写长度、下载体积和总处理时长限制
+- 如果视频超过下载限制、处理失败或图片预算不足，插件会注入一条跳过说明，但不会强行处理超出预算的视频
 - 转写文本会按 `max_transcript_chars` 和 `max_total_transcript_chars` 双重限制，防止提示过长
 - 如果平台适配器对引用视频只返回裸文件名而没有真实路径，AstrBot Core 仍可能先打印一条错误日志
 

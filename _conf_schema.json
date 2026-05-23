@@ -63,7 +63,26 @@
       "max_frames_per_video": {
         "type": "int",
         "default": 10,
-        "description": "每个视频最多抽取的关键帧数"
+        "description": "短视频最多抽取的关键帧数",
+        "hint": "用于未触发长视频分段的视频。长视频会优先使用下面的“长视频最多抽取的关键帧数”。"
+      },
+      "max_long_video_frames_per_video": {
+        "type": "int",
+        "default": 16,
+        "description": "长视频最多抽取的关键帧数",
+        "hint": "这是整条长视频的总帧数预算，不会按分段数倍增。例如分 3 段且这里填 16，插件会把 16 帧分配到各段，而不是抽 30 帧。"
+      },
+      "max_images_per_request": {
+        "type": "int",
+        "default": 24,
+        "description": "单次请求最多注入的图片数",
+        "hint": "作为最后一道总量保护，避免多个视频或长视频抽帧后向上游模型注入过多图片。"
+      },
+      "max_total_frame_bytes_mb": {
+        "type": "float",
+        "default": 10.0,
+        "description": "单次请求图片总体积预算（MB）",
+        "hint": "填 0 表示不限制。插件会在注入 image_urls 前按抽帧顺序保留不超过预算的图片。"
       },
       "fixed_interval_seconds": {
         "type": "float",
@@ -84,7 +103,7 @@
       },
       "max_video_duration_seconds": {
         "type": "int",
-        "default": 30,
+        "default": 90,
         "description": "单个视频用于抽帧的总分析时长预算（秒）",
         "hint": "未启用分段时表示从视频开头最多分析多少秒；启用 `segment_policy` 后表示抽帧总共最多覆盖多少秒视频内容。"
       }
@@ -96,7 +115,7 @@
     "items": {
       "enabled": {
         "type": "bool",
-        "default": false,
+        "default": true,
         "description": "启用长视频分段"
       },
       "selection_mode": {
@@ -236,6 +255,18 @@
         "default": 2400,
         "description": "单个视频全部转写总共最大保留字符数",
         "hint": "启用分段后，插件会先限制每段长度，再限制整条视频的总转写长度，避免提示过长。"
+      },
+      "log_transcript_preview": {
+        "type": "bool",
+        "default": false,
+        "description": "记录转写预览到 Debug 日志",
+        "hint": "需要同时打开插件总开关“启用插件 Debug 日志”才会输出。转写内容可能包含隐私，建议只在排错时临时开启。"
+      },
+      "transcript_preview_chars": {
+        "type": "int",
+        "default": 300,
+        "description": "转写预览最大字符数",
+        "hint": "仅影响 Debug 日志里的预览长度，不影响真正注入给模型的转写文本长度。"
       }
     }
   },
@@ -286,6 +317,12 @@
         "default": "- {segment_label} ({start_seconds:.1f}s-{end_seconds:.1f}s): {transcript}",
         "description": "单个分段转写模板",
         "hint": "可使用 {segment_label} {start_seconds} {end_seconds} {transcript} 占位符。"
+      },
+      "skipped_video_template": {
+        "type": "text",
+        "default": "[视频处理提示][{video_name}] 该视频未被插件处理：{reason}。{detail}",
+        "description": "视频跳过提示模板",
+        "hint": "当视频因为下载体积、处理失败或图片预算不足被跳过时注入。可使用 {video_name} {reason} {detail} 占位符。"
       }
     }
   },
@@ -301,7 +338,7 @@
       },
       "max_download_size_mb": {
         "type": "float",
-        "default": 64.0,
+        "default": 128.0,
         "description": "单个远程视频最大下载体积（MB）",
         "hint": "填 0 表示不限制。插件会同时检查响应头里的 `content-length` 和实际下载过程。"
       },

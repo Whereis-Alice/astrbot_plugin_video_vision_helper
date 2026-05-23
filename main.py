@@ -32,7 +32,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 
 PLUGIN_ID = "astrbot_plugin_video_vision_helper"
-PLUGIN_VERSION = "0.3.1"
+PLUGIN_VERSION = "0.4.0"
 PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u589e\u5f3a\u591a\u6a21\u6001\u89c6\u9891\u7406\u89e3"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper"
 
@@ -49,6 +49,10 @@ DEFAULT_VIDEO_TEMPLATE = (
 )
 DEFAULT_TRANSCRIPT_TEMPLATE = "[\u89c6\u9891\u97f3\u9891\u8f6c\u5199][{video_name}] \u5171 {segment_count} \u4e2a\u7247\u6bb5\uff1a\n{transcript}"
 DEFAULT_TRANSCRIPT_SEGMENT_TEMPLATE = "- {segment_label} ({start_seconds:.1f}s-{end_seconds:.1f}s): {transcript}"
+DEFAULT_SKIPPED_VIDEO_TEMPLATE = (
+    "[\u89c6\u9891\u5904\u7406\u63d0\u793a][{video_name}] \u8be5\u89c6\u9891\u672a\u88ab\u63d2\u4ef6\u5904\u7406\uff1a{reason}\u3002"
+    "{detail}"
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,9 @@ class FramePolicy:
     max_videos_per_request: int
     sampling_mode: str
     max_frames_per_video: int
+    max_long_video_frames_per_video: int
+    max_images_per_request: int
+    max_total_frame_bytes_mb: float
     fixed_interval_seconds: float
     max_side: int
     jpeg_quality: int
@@ -100,6 +107,8 @@ class SttPolicy:
     timeout_seconds: int
     max_transcript_chars: int
     max_total_transcript_chars: int
+    log_transcript_preview: bool
+    transcript_preview_chars: int
 
 
 @dataclass(frozen=True)
@@ -111,6 +120,7 @@ class HintPolicy:
     video_template: str
     transcript_template: str
     transcript_segment_template: str
+    skipped_video_template: str
 
 
 @dataclass(frozen=True)
@@ -181,6 +191,37 @@ class ProcessedVideo:
     transcript_chunks: list[TranscriptChunk]
     segment_count: int
     coverage_seconds: float
+
+
+@dataclass(frozen=True)
+class SkippedVideoNotice:
+    video_name: str
+    reason: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class FrameReference:
+    result_index: int
+    path: Path
+
+
+@dataclass(frozen=True)
+class DownloadedVideo:
+    path: Path | None = None
+    skipped_notice: SkippedVideoNotice | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedVideoSegment:
+    attachment: VideoAttachment | None = None
+    skipped_notice: SkippedVideoNotice | None = None
+
+
+@dataclass(frozen=True)
+class CollectedVideoAttachments:
+    attachments: list[VideoAttachment]
+    skipped_notices: list[SkippedVideoNotice]
 
 
 @register(PLUGIN_ID, "Whereis-Alice", PLUGIN_DESC, PLUGIN_VERSION, PLUGIN_REPO)
@@ -341,6 +382,24 @@ class VideoVisionHelper(Star):
                     minimum=1,
                     maximum=24,
                 ),
+                max_long_video_frames_per_video=self._read_int(
+                    frame_conf.get("max_long_video_frames_per_video"),
+                    16,
+                    minimum=1,
+                    maximum=64,
+                ),
+                max_images_per_request=self._read_int(
+                    frame_conf.get("max_images_per_request"),
+                    24,
+                    minimum=1,
+                    maximum=128,
+                ),
+                max_total_frame_bytes_mb=self._read_float(
+                    frame_conf.get("max_total_frame_bytes_mb"),
+                    10.0,
+                    minimum=0.0,
+                    maximum=256.0,
+                ),
                 fixed_interval_seconds=self._read_float(
                     frame_conf.get("fixed_interval_seconds"),
                     2.0,
@@ -361,13 +420,13 @@ class VideoVisionHelper(Star):
                 ),
                 max_video_duration_seconds=self._read_int(
                     frame_conf.get("max_video_duration_seconds"),
-                    30,
+                    90,
                     minimum=1,
                     maximum=60 * 60,
                 ),
             ),
             segment=SegmentPolicy(
-                enabled=self._read_bool(segment_conf.get("enabled"), False),
+                enabled=self._read_bool(segment_conf.get("enabled"), True),
                 selection_mode=segment_selection_mode,
                 segment_duration_seconds=self._read_int(
                     segment_conf.get("segment_duration_seconds"),
@@ -442,6 +501,16 @@ class VideoVisionHelper(Star):
                     minimum=128,
                     maximum=50000,
                 ),
+                log_transcript_preview=self._read_bool(
+                    stt_conf.get("log_transcript_preview"),
+                    False,
+                ),
+                transcript_preview_chars=self._read_int(
+                    stt_conf.get("transcript_preview_chars"),
+                    300,
+                    minimum=32,
+                    maximum=5000,
+                ),
             ),
             hint=HintPolicy(
                 enabled=self._read_bool(hint_conf.get("enabled"), True),
@@ -466,6 +535,10 @@ class VideoVisionHelper(Star):
                     hint_conf.get("transcript_segment_template"),
                     DEFAULT_TRANSCRIPT_SEGMENT_TEMPLATE,
                 ),
+                skipped_video_template=self._read_str(
+                    hint_conf.get("skipped_video_template"),
+                    DEFAULT_SKIPPED_VIDEO_TEMPLATE,
+                ),
             ),
             download=DownloadPolicy(
                 quoted_video_download_enabled=self._read_bool(
@@ -474,7 +547,7 @@ class VideoVisionHelper(Star):
                 ),
                 max_download_size_mb=self._read_float(
                     download_conf.get("max_download_size_mb"),
-                    64.0,
+                    128.0,
                     minimum=0.0,
                     maximum=4096.0,
                 ),
@@ -625,16 +698,43 @@ class VideoVisionHelper(Star):
         url: str,
         suggested_name: str,
         policy: DownloadPolicy,
-    ) -> Path | None:
+        *,
+        declared_size_bytes: int | None = None,
+    ) -> DownloadedVideo:
         if not policy.quoted_video_download_enabled:
             self._debug("quoted video remote download is disabled, skipping url=%s", url)
-            return None
+            return DownloadedVideo(
+                skipped_notice=SkippedVideoNotice(
+                    video_name=suggested_name,
+                    reason="远程视频下载已关闭",
+                    detail="请在插件配置中打开“允许从 quoted video 的远程 URL 下载文件”，或让平台提供本地视频路径。",
+                ),
+            )
 
         parsed = urlparse(url)
         suffix = Path(parsed.path).suffix or Path(suggested_name).suffix or ".mp4"
         output_path = self._make_temp_path(suffix)
         self._debug("downloading quoted video from url=%s to path=%s", url, output_path)
         max_bytes = int(policy.max_download_size_mb * 1024 * 1024) if policy.max_download_size_mb > 0 else 0
+        if max_bytes > 0 and declared_size_bytes is not None and declared_size_bytes > max_bytes:
+            logger.warning(
+                "[%s] skipped quoted video download because declared file_size exceeds limit: %s > %s bytes (%s)",
+                PLUGIN_ID,
+                declared_size_bytes,
+                max_bytes,
+                url,
+            )
+            return DownloadedVideo(
+                skipped_notice=SkippedVideoNotice(
+                    video_name=suggested_name,
+                    reason="远程视频超过下载体积限制",
+                    detail=(
+                        f"平台上报文件大小约 {self._format_size(declared_size_bytes)}，"
+                        f"当前限制为 {self._format_size(max_bytes)}。"
+                    ),
+                ),
+            )
+
         try:
             async with httpx.AsyncClient(
                 follow_redirects=True,
@@ -652,7 +752,16 @@ class VideoVisionHelper(Star):
                             max_bytes,
                             url,
                         )
-                        return None
+                        return DownloadedVideo(
+                            skipped_notice=SkippedVideoNotice(
+                                video_name=suggested_name,
+                                reason="远程视频超过下载体积限制",
+                                detail=(
+                                    f"响应头显示文件大小约 {self._format_size(int(raw_content_length))}，"
+                                    f"当前限制为 {self._format_size(max_bytes)}。"
+                                ),
+                            ),
+                        )
 
                     downloaded_bytes = 0
                     with output_path.open("wb") as file_obj:
@@ -669,18 +778,39 @@ class VideoVisionHelper(Star):
                                     url,
                                 )
                                 output_path.unlink(missing_ok=True)
-                                return None
+                                return DownloadedVideo(
+                                    skipped_notice=SkippedVideoNotice(
+                                        video_name=suggested_name,
+                                        reason="远程视频超过下载体积限制",
+                                        detail=(
+                                            f"已下载内容超过 {self._format_size(max_bytes)} 后中止，"
+                                            f"当前配置不处理更大的视频。"
+                                        ),
+                                    ),
+                                )
                             file_obj.write(chunk)
         except Exception as exc:
             logger.warning("[%s] failed to download quoted video from %s: %s", PLUGIN_ID, url, exc)
             output_path.unlink(missing_ok=True)
-            return None
+            return DownloadedVideo(
+                skipped_notice=SkippedVideoNotice(
+                    video_name=suggested_name,
+                    reason="远程视频下载失败",
+                    detail=f"下载请求未成功：{exc}",
+                ),
+            )
         if not output_path.exists() or output_path.stat().st_size <= 0:
             output_path.unlink(missing_ok=True)
             self._debug("downloaded quoted video is empty: %s", output_path)
-            return None
+            return DownloadedVideo(
+                skipped_notice=SkippedVideoNotice(
+                    video_name=suggested_name,
+                    reason="远程视频下载结果为空",
+                    detail="平台返回了视频 URL，但插件没有获得可用的视频文件。",
+                ),
+            )
         self._track_temp_file(event, output_path)
-        return output_path
+        return DownloadedVideo(path=output_path)
 
     async def _resolve_onebot_video_segment(
         self,
@@ -689,10 +819,11 @@ class VideoVisionHelper(Star):
         *,
         quoted: bool,
         download_policy: DownloadPolicy,
-    ) -> VideoAttachment | None:
+    ) -> ResolvedVideoSegment:
         candidates = self._collect_video_path_candidates_from_mapping(payload)
         url = self._read_str(payload.get("url"), "")
         name = self._guess_video_name_from_mapping(payload)
+        declared_size_bytes = self._safe_parse_positive_int(payload.get("file_size"))
         self._debug(
             "resolving raw onebot %s video payload=%s candidates=%s",
             "quoted" if quoted else "direct",
@@ -704,41 +835,49 @@ class VideoVisionHelper(Star):
             if candidate.exists() and candidate.is_file():
                 resolved = candidate.resolve()
                 self._debug("resolved raw onebot video via local candidate: %s", resolved)
-                return VideoAttachment(name=name or resolved.name, path=resolved, quoted=quoted)
+                return ResolvedVideoSegment(
+                    attachment=VideoAttachment(name=name or resolved.name, path=resolved, quoted=quoted),
+                )
 
         if url.startswith("http://") or url.startswith("https://"):
-            downloaded_path = await self._download_video_from_url(
+            downloaded_video = await self._download_video_from_url(
                 event,
                 url,
                 name,
                 download_policy,
+                declared_size_bytes=declared_size_bytes,
             )
-            if downloaded_path is not None:
-                return VideoAttachment(
-                    name=name or downloaded_path.name,
-                    path=downloaded_path,
-                    quoted=quoted,
+            if downloaded_video.path is not None:
+                return ResolvedVideoSegment(
+                    attachment=VideoAttachment(
+                        name=name or downloaded_video.path.name,
+                        path=downloaded_video.path,
+                        quoted=quoted,
+                    ),
                 )
+            if downloaded_video.skipped_notice is not None:
+                return ResolvedVideoSegment(skipped_notice=downloaded_video.skipped_notice)
 
-        return None
+        return ResolvedVideoSegment()
 
     async def _collect_aiocqhttp_reply_video_attachments(
         self,
         event: AstrMessageEvent,
         seen_paths: set[str],
         download_policy: DownloadPolicy,
-    ) -> list[VideoAttachment]:
+    ) -> CollectedVideoAttachments:
         bot = getattr(event, "bot", None)
         raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
         if bot is None or raw_message is None:
-            return []
+            return CollectedVideoAttachments(attachments=[], skipped_notices=[])
 
         reply_ids = self._extract_reply_ids_from_raw_event(raw_message)
         if not reply_ids:
-            return []
+            return CollectedVideoAttachments(attachments=[], skipped_notices=[])
         self._debug("aiocqhttp raw reply ids for quoted video fallback: %s", reply_ids)
 
         attachments: list[VideoAttachment] = []
+        skipped_notices: list[SkippedVideoNotice] = []
         for reply_id in reply_ids:
             try:
                 reply_event_data = await bot.call_action(
@@ -755,12 +894,15 @@ class VideoVisionHelper(Star):
                 payload = self._safe_event_get(segment, "data", {})
                 if not isinstance(payload, dict):
                     continue
-                attachment = await self._resolve_onebot_video_segment(
+                resolved = await self._resolve_onebot_video_segment(
                     event,
                     payload,
                     quoted=True,
                     download_policy=download_policy,
                 )
+                if resolved.skipped_notice is not None:
+                    skipped_notices.append(resolved.skipped_notice)
+                attachment = resolved.attachment
                 if attachment is None:
                     continue
                 key = str(attachment.path)
@@ -774,7 +916,15 @@ class VideoVisionHelper(Star):
                 "collected %s quoted video attachment(s) from aiocqhttp raw reply fallback",
                 len(attachments),
             )
-        return attachments
+        if skipped_notices:
+            self._debug(
+                "collected %s skipped quoted video notice(s) from aiocqhttp raw reply fallback",
+                len(skipped_notices),
+            )
+        return CollectedVideoAttachments(
+            attachments=attachments,
+            skipped_notices=skipped_notices,
+        )
 
     async def _resolve_video_component_path(
         self,
@@ -899,8 +1049,9 @@ class VideoVisionHelper(Star):
         self,
         event: AstrMessageEvent,
         settings: PluginSettings,
-    ) -> list[VideoAttachment]:
+    ) -> CollectedVideoAttachments:
         attachments: list[VideoAttachment] = []
+        skipped_notices: list[SkippedVideoNotice] = []
         seen_paths: set[str] = set()
         messages = event.get_messages()
         self._debug("falling back to event message chain for video resolution, component_count=%s", len(messages))
@@ -934,25 +1085,29 @@ class VideoVisionHelper(Star):
                         VideoAttachment(name=path.name, path=path, quoted=True),
                     )
 
-        aiocqhttp_reply_attachments = await self._collect_aiocqhttp_reply_video_attachments(
+        aiocqhttp_reply_result = await self._collect_aiocqhttp_reply_video_attachments(
             event,
             seen_paths,
             settings.download,
         )
-        attachments.extend(aiocqhttp_reply_attachments)
+        attachments.extend(aiocqhttp_reply_result.attachments)
+        skipped_notices.extend(aiocqhttp_reply_result.skipped_notices)
         self._debug("collected %s video attachment(s) from event fallback", len(attachments))
-        return attachments
+        return CollectedVideoAttachments(
+            attachments=attachments,
+            skipped_notices=skipped_notices,
+        )
 
     async def _collect_video_attachments(
         self,
         event: AstrMessageEvent,
         req: ProviderRequest,
         settings: PluginSettings,
-    ) -> list[VideoAttachment]:
+    ) -> CollectedVideoAttachments:
         attachments = self._collect_video_attachment_markers(req)
         if attachments:
             self._debug("using request markers as the video attachment source")
-            return attachments
+            return CollectedVideoAttachments(attachments=attachments, skipped_notices=[])
         self._debug("no video markers were injected by core, falling back to event parsing")
         return await self._collect_video_attachments_from_event(event, settings)
 
@@ -973,6 +1128,25 @@ class VideoVisionHelper(Star):
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _safe_parse_positive_int(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _format_size(byte_count: int | float) -> str:
+        size = float(max(byte_count, 0))
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                if unit == "B":
+                    return f"{int(size)} {unit}"
+                return f"{size:.2f} {unit}"
+            size /= 1024.0
+        return f"{size:.2f} GB"
 
     @staticmethod
     def _normalize_endpoint(endpoint: str) -> str:
@@ -1448,16 +1622,7 @@ class VideoVisionHelper(Star):
             if tail_window_start <= head_window_end:
                 return self._decide_frame_timestamps(
                     target_duration,
-                    FramePolicy(
-                        enabled=policy.enabled,
-                        max_videos_per_request=policy.max_videos_per_request,
-                        sampling_mode="uniform",
-                        max_frames_per_video=policy.max_frames_per_video,
-                        fixed_interval_seconds=policy.fixed_interval_seconds,
-                        max_side=policy.max_side,
-                        jpeg_quality=policy.jpeg_quality,
-                        max_video_duration_seconds=policy.max_video_duration_seconds,
-                    ),
+                    replace(policy, sampling_mode="uniform"),
                     frame_count=target_count,
                 )
 
@@ -1622,7 +1787,9 @@ class VideoVisionHelper(Star):
                     exc,
                 )
                 return None
-            return self._finalize_transcript(transcript, policy)
+            finalized = self._finalize_transcript(transcript, policy)
+            self._log_transcript_preview(audio_path, finalized, policy)
+            return finalized
 
         if policy.backend != "openai_compatible":
             return None
@@ -1681,7 +1848,9 @@ class VideoVisionHelper(Star):
         else:
             transcript = response.text.strip()
 
-        return self._finalize_transcript(transcript, policy)
+        finalized = self._finalize_transcript(transcript, policy)
+        self._log_transcript_preview(audio_path, finalized, policy)
+        return finalized
 
     @staticmethod
     def _format_template(template: str, fallback: str, **kwargs: Any) -> str:
@@ -1780,6 +1949,126 @@ class VideoVisionHelper(Star):
             segment_count=len(transcript_chunks),
             transcript=transcript_body,
         )
+
+    def _build_skipped_video_text(
+        self,
+        policy: HintPolicy,
+        notice: SkippedVideoNotice,
+    ) -> str:
+        return self._format_template(
+            policy.skipped_video_template,
+            DEFAULT_SKIPPED_VIDEO_TEMPLATE,
+            video_name=notice.video_name,
+            reason=notice.reason,
+            detail=notice.detail,
+        )
+
+    def _log_transcript_preview(
+        self,
+        audio_path: Path,
+        transcript: str | None,
+        policy: SttPolicy,
+    ) -> None:
+        if not transcript or not policy.log_transcript_preview:
+            return
+        preview = self._truncate_text(transcript, policy.transcript_preview_chars)
+        self._debug(
+            "stt transcript preview for %s: %s",
+            audio_path,
+            preview,
+        )
+
+    def _apply_frame_payload_budget(
+        self,
+        results: list[ProcessedVideo],
+        policy: FramePolicy,
+    ) -> tuple[list[ProcessedVideo], list[SkippedVideoNotice]]:
+        if not results:
+            return [], []
+
+        max_images = max(1, policy.max_images_per_request)
+        max_bytes = (
+            int(policy.max_total_frame_bytes_mb * 1024 * 1024)
+            if policy.max_total_frame_bytes_mb > 0
+            else 0
+        )
+        selected_by_result: dict[int, list[Path]] = {index: [] for index in range(len(results))}
+        selected_count = 0
+        selected_bytes = 0
+        dropped_count = 0
+        dropped_bytes = 0
+
+        for result_index, result in enumerate(results):
+            for frame_path in result.frame_paths:
+                try:
+                    frame_size = frame_path.stat().st_size
+                except OSError:
+                    self._debug("dropping missing extracted frame before injection: %s", frame_path)
+                    dropped_count += 1
+                    continue
+
+                if selected_count >= max_images:
+                    dropped_count += 1
+                    dropped_bytes += frame_size
+                    continue
+
+                if max_bytes > 0 and selected_bytes + frame_size > max_bytes:
+                    dropped_count += 1
+                    dropped_bytes += frame_size
+                    continue
+
+                selected_by_result[result_index].append(frame_path)
+                selected_count += 1
+                selected_bytes += frame_size
+
+        if dropped_count > 0:
+            budget_text = (
+                f"{self._format_size(max_bytes)}"
+                if max_bytes > 0
+                else "不限制"
+            )
+            logger.warning(
+                "[%s] dropped %s extracted frame(s) before injection because image budget was reached: selected=%s/%s, bytes=%s/%s, dropped_bytes=%s",
+                PLUGIN_ID,
+                dropped_count,
+                selected_count,
+                max_images,
+                self._format_size(selected_bytes),
+                budget_text,
+                self._format_size(dropped_bytes),
+            )
+
+        budget_skipped_notices: list[SkippedVideoNotice] = []
+        budgeted_results: list[ProcessedVideo] = []
+        for result_index, result in enumerate(results):
+            selected_frames = selected_by_result.get(result_index, [])
+            if (
+                result.frame_paths
+                and not selected_frames
+                and not result.audio_paths
+                and not result.transcript_chunks
+            ):
+                budget_skipped_notices.append(
+                    SkippedVideoNotice(
+                        video_name=result.attachment.name,
+                        reason="图片预算不足",
+                        detail=(
+                            f"该视频抽出的 {len(result.frame_paths)} 张关键帧未注入；"
+                            f"当前单次请求最多注入 {max_images} 张图片，"
+                            f"图片总体积预算为 {self._format_size(max_bytes) if max_bytes > 0 else '不限制'}。"
+                        ),
+                    ),
+                )
+                continue
+            budgeted_results.append(replace(result, frame_paths=selected_frames))
+
+        self._debug(
+            "frame payload budget result: selected_frames=%s selected_bytes=%s dropped_frames=%s",
+            selected_count,
+            self._format_size(selected_bytes),
+            dropped_count,
+        )
+        return budgeted_results, budget_skipped_notices
 
     @staticmethod
     def _has_hint_part(req: ProviderRequest, hint_text: str) -> bool:
@@ -1910,8 +2199,27 @@ class VideoVisionHelper(Star):
         frame_paths: list[Path] = []
         covered_segments: dict[str, float] = {}
         if settings.frame.enabled:
-            frame_distribution = self._distribute_items(
+            is_long_video = (
+                settings.segment.enabled
+                and probe_info.duration_seconds > float(settings.segment.min_video_duration_seconds)
+                and len(frame_segments) > 1
+            )
+            effective_frame_budget = (
+                settings.frame.max_long_video_frames_per_video
+                if is_long_video
+                else settings.frame.max_frames_per_video
+            )
+            self._debug(
+                "frame budget for %s: long_video=%s budget=%s short_budget=%s long_budget=%s segment_count=%s",
+                attachment.path,
+                is_long_video,
+                effective_frame_budget,
                 settings.frame.max_frames_per_video,
+                settings.frame.max_long_video_frames_per_video,
+                len(frame_segments),
+            )
+            frame_distribution = self._distribute_items(
+                effective_frame_budget,
                 len(frame_segments),
             )
             seen_timestamps: set[float] = set()
@@ -2120,11 +2428,34 @@ class VideoVisionHelper(Star):
             settings.runtime.max_processing_seconds_per_video or "disabled",
         )
 
-        attachments = await self._collect_video_attachments(event, req, settings)
+        collection = await self._collect_video_attachments(event, req, settings)
+        attachments = collection.attachments
+        skipped_notices = list(collection.skipped_notices)
         if not attachments:
             self._debug("no video attachments were collected for this request")
+            if settings.hint.enabled and skipped_notices:
+                self._apply_texts(
+                    req,
+                    settings.hint.target,
+                    [
+                        self._build_skipped_video_text(settings.hint, notice)
+                        for notice in skipped_notices
+                    ],
+                )
             return
 
+        if len(attachments) > settings.frame.max_videos_per_request:
+            skipped_notices.extend(
+                SkippedVideoNotice(
+                    video_name=attachment.name,
+                    reason="超过单次请求视频数量限制",
+                    detail=(
+                        f"当前配置单次最多处理 {settings.frame.max_videos_per_request} 个视频，"
+                        "该视频未进入本次处理队列。"
+                    ),
+                )
+                for attachment in attachments[settings.frame.max_videos_per_request :]
+            )
         attachments = attachments[: settings.frame.max_videos_per_request]
         self._debug("processing %s video attachment(s) after request limit", len(attachments))
         processed_results: list[ProcessedVideo] = []
@@ -2134,8 +2465,22 @@ class VideoVisionHelper(Star):
             result = await self._process_single_video(event, attachment, settings)
             if result is not None:
                 processed_results.append(result)
+            else:
+                skipped_notices.append(
+                    SkippedVideoNotice(
+                        video_name=attachment.name,
+                        reason="视频未产出可用的多模态内容",
+                        detail="插件没有成功抽取关键帧、音频附件或转写文本；可能是格式不受 FFmpeg 支持、处理超时，或当前策略关闭了相关处理。",
+                    ),
+                )
 
-        if not processed_results:
+        processed_results, budget_skipped_notices = self._apply_frame_payload_budget(
+            processed_results,
+            settings.frame,
+        )
+        skipped_notices.extend(budget_skipped_notices)
+
+        if not processed_results and not skipped_notices:
             return
 
         removed_indices = {
@@ -2190,27 +2535,38 @@ class VideoVisionHelper(Star):
                     transcript_texts.append(transcript_text)
 
         if settings.hint.enabled:
-            summary_text = self._build_summary_text(
-                settings.hint,
-                video_count=len(processed_results),
-                frame_count=total_frame_count,
-                segment_count=total_segment_count,
-                coverage_seconds=total_coverage_seconds,
-                audio_count=attached_audio_count,
-                transcript_count=transcript_count,
+            hint_texts: list[str] = []
+            if processed_results:
+                hint_texts.append(
+                    self._build_summary_text(
+                        settings.hint,
+                        video_count=len(processed_results),
+                        frame_count=total_frame_count,
+                        segment_count=total_segment_count,
+                        coverage_seconds=total_coverage_seconds,
+                        audio_count=attached_audio_count,
+                        transcript_count=transcript_count,
+                    ),
+                )
+            hint_texts.extend(video_texts)
+            hint_texts.extend(transcript_texts)
+            hint_texts.extend(
+                self._build_skipped_video_text(settings.hint, notice)
+                for notice in skipped_notices
             )
             self._apply_texts(
                 req,
                 settings.hint.target,
-                [summary_text, *video_texts, *transcript_texts],
+                hint_texts,
             )
 
         logger.info(
-            "[%s] expanded %s video attachment(s): +%s frames, +%s audios, +%s transcripts across %s segment(s)",
+            "[%s] expanded %s video attachment(s): +%s frames, +%s audios, +%s transcripts across %s segment(s), skipped=%s",
             PLUGIN_ID,
             len(processed_results),
             total_frame_count,
             attached_audio_count,
             transcript_count,
             total_segment_count,
+            len(skipped_notices),
         )
