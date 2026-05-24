@@ -2,7 +2,7 @@
 
 `astrbot_plugin_video_vision_helper` 是一个 AstrBot 插件，用来把视频附件转换成当前多模态请求更容易消费的输入内容。
 
-- 抽取关键帧并写入 `image_urls`
+- 抽取关键帧并注入当前请求的多模态内容
 - 可选抽取音频并写入 `audio_urls`
 - 可选执行 STT，把转写文本注入到提示中
 
@@ -33,6 +33,7 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 - 支持 quoted video 远程下载体积限制与超时保护
 - 支持单视频总处理时长上限，避免抽帧、抽音频和 STT 无限拖长
 - 支持短视频帧数与长视频总帧数独立配置，避免长视频按分段数无限放大图片量
+- 支持默认不将抽到的关键帧写入会话历史，避免下一轮对话重复携带上一次视频帧
 - 支持单次请求图片张数上限和图片总体积预算，降低上游多模态模型压力
 - 支持视频被跳过时注入明确兜底提示，方便模型知道用户确实发过视频
 - 支持 `debug_logging` 调试开关，便于排查视频解析和 STT 问题
@@ -119,6 +120,10 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 - `frame_policy.max_total_frame_bytes_mb`
 
 如果日志里出现 `processing time limit was reached at stage=frame_extraction`，说明瓶颈不在模型，而在本地 FFmpeg 抽帧耗时。可以优先确认 `ffmpeg_policy.frame_seek_mode = fast`，再提高 `runtime_policy.max_processing_seconds_per_video`，或者适当降低长视频总帧数。
+
+默认情况下，插件会把抽到的关键帧作为临时 `ImageURLPart` 注入当前请求。本轮模型能看见这些帧，但 AstrBot 保存历史时会自动剥掉它们，所以下一轮不会继续带着上一轮视频帧。
+
+如果你希望保留旧行为，让抽帧进入会话历史，可以把 `frame_policy.persist_sampled_frames_to_history = true`。这个开关只影响插件抽出来的帧，不影响用户原本手动发来的图片。
 
 ## 临时文件与清理策略
 
@@ -233,6 +238,7 @@ Error processing quoted video attachment: not a valid file: 8703a2ebfa5f99dd29ce
 - `debug_logging`：调试日志开关
 - `ffmpeg_policy`：FFmpeg/FFprobe 路径、命令超时和抽帧 seek 模式
 - `frame_policy`：视频数量限制、抽帧模式、短视频帧数、长视频总帧数、图片张数预算、图片总体积预算、缩放和抽帧总分析时长
+- `frame_policy.persist_sampled_frames_to_history`：是否把抽到的关键帧写入会话历史
 - `segment_policy`：长视频是否分段、取段方式、单段时长和分段数量
 - `audio_policy`：音频模式、采样率、音频 / STT 总分析时长、STT 失败时是否回退为仅附带音频
 - `stt_policy`：STT 后端选择、AstrBot provider 绑定、自定义转写接口、语言、单段转写长度、整条视频总转写长度限制和可选转写预览日志

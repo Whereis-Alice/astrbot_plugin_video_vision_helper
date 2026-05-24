@@ -1,5 +1,12 @@
 # 更新日志
 
+## 0.4.4 - 2026-05-24
+
+- 默认将插件抽取的关键帧改为临时 `ImageURLPart` 注入，避免关键帧进入会话历史并在下一轮重复携带
+- 新增 `frame_policy.persist_sampled_frames_to_history`，可一键回退到旧的 `req.image_urls` 持久化行为
+- 保持用户原始图片输入不变，只影响插件自己生成的抽帧结果
+- 更新 README、配置 schema 与插件元数据
+
 ## 0.4.3 - 2026-05-24
 
 - 新增 `cleanup_policy`，支持插件启动时和请求后按间隔兜底清理过期临时文件

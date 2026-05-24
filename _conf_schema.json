@@ -82,6 +82,12 @@
         "description": "长视频最多抽取的关键帧数",
         "hint": "这是整条长视频的总帧数预算，不会按分段数倍增。插件会按片段时长加权分配帧数，例如长片段分到更多帧、短片段分到更少帧。"
       },
+      "persist_sampled_frames_to_history": {
+        "type": "bool",
+        "default": false,
+        "description": "将抽取到的关键帧持久化到会话历史",
+        "hint": "关闭后，插件会把抽帧改为临时 ImageURLPart 注入，只保证本轮可见，后续历史中不会保留这些帧。开启后恢复旧行为，抽帧会直接写入 image_urls 并进入历史。"
+      },
       "max_images_per_request": {
         "type": "int",
         "default": 32,

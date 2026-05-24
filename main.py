@@ -27,7 +27,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
-from astrbot.core.agent.message import TextPart
+from astrbot.core.agent.message import ImageURLPart, TextPart
 from astrbot.core.message.components import Reply, Video
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
@@ -71,6 +71,7 @@ class FramePolicy:
     sampling_mode: str
     max_frames_per_video: int
     max_long_video_frames_per_video: int
+    persist_sampled_frames_to_history: bool
     max_images_per_request: int
     max_total_frame_bytes_mb: float
     fixed_interval_seconds: float
@@ -349,6 +350,17 @@ class VideoVisionHelper(Star):
         if sampling_mode not in {"uniform", "fixed_interval", "head_tail"}:
             sampling_mode = "uniform"
 
+        persist_sampled_frames_to_history = self._read_bool(
+            frame_conf.get("persist_sampled_frames_to_history"),
+            False,
+        )
+        legacy_do_not_persist = frame_conf.get("do_not_persist_sampled_frames")
+        if legacy_do_not_persist is not None:
+            persist_sampled_frames_to_history = not self._read_bool(
+                legacy_do_not_persist,
+                True,
+            )
+
         segment_selection_mode = self._read_str(
             segment_conf.get("selection_mode"),
             "uniform",
@@ -419,6 +431,7 @@ class VideoVisionHelper(Star):
                     minimum=1,
                     maximum=64,
                 ),
+                persist_sampled_frames_to_history=persist_sampled_frames_to_history,
                 max_images_per_request=self._read_int(
                     frame_conf.get("max_images_per_request"),
                     32,
@@ -1181,6 +1194,25 @@ class VideoVisionHelper(Star):
     def _make_temp_path(suffix: str) -> Path:
         temp_root = Path(tempfile.gettempdir())
         return temp_root / f"{PLUGIN_ID}_{uuid.uuid4().hex}{suffix}"
+
+    @staticmethod
+    def _make_temp_image_part(path: Path) -> ImageURLPart:
+        return ImageURLPart(
+            image_url=ImageURLPart.ImageURL(url=str(path)),
+        ).mark_as_temp()
+
+    def _inject_frame_artifacts(
+        self,
+        req: ProviderRequest,
+        frame_paths: list[Path],
+        *,
+        persist_to_history: bool,
+    ) -> None:
+        if persist_to_history:
+            req.image_urls.extend(str(path) for path in frame_paths)
+            return
+        for path in frame_paths:
+            req.extra_user_content_parts.append(self._make_temp_image_part(path))
 
     @staticmethod
     def _temp_file_prefix() -> str:
@@ -2800,7 +2832,11 @@ class VideoVisionHelper(Star):
 
         for result in processed_results:
             if result.frame_paths:
-                req.image_urls.extend(str(path) for path in result.frame_paths)
+                self._inject_frame_artifacts(
+                    req,
+                    result.frame_paths,
+                    persist_to_history=settings.frame.persist_sampled_frames_to_history,
+                )
                 total_frame_count += len(result.frame_paths)
             if result.audio_paths:
                 req.audio_urls.extend(str(path) for path in result.audio_paths)
