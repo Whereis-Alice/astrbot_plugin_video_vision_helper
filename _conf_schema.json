@@ -344,19 +344,43 @@
   },
   "download_policy": {
     "type": "object",
-    "description": "远程下载保护策略",
+    "description": "远程视频与群文件下载策略",
     "items": {
       "quoted_video_download_enabled": {
         "type": "bool",
         "default": true,
-        "description": "允许从 quoted video 的远程 URL 下载文件",
+        "description": "允许从引用视频的远程 URL 下载文件",
         "hint": "主要用于 OneBot / aiocqhttp 等平台只返回 `url` 而没有本地绝对路径的场景。"
+      },
+      "group_file_video_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "识别以群文件形式发送的视频",
+        "hint": "开启后会识别 AstrBot File 组件；当 OneBot 只提供 file_id / busid 时，会调用 get_group_file_url 获取下载地址。直接发送和引用群文件都支持。"
+      },
+      "group_file_video_extensions": {
+        "type": "string",
+        "default": "mp4,m4v,mov,mkv,webm,avi,flv,wmv,mpeg,mpg,ts,m2ts,mts,3gp,3g2,ogv,vob,asf,rm,rmvb",
+        "description": "按文件识别的视频扩展名",
+        "hint": "使用逗号、空格或分号分隔，不必写点号。插件只会下载命中扩展名或 MIME 为 video/* 的文件，普通群文件不会进入视频处理。"
+      },
+      "group_file_empty_prompt_fallback_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "群文件视频无文字时补充默认提问",
+        "hint": "AstrBot 在群聊中收到只有文件、没有文字的已唤醒请求时，可能在插件 on_llm_request 之前结束构建；开启后会在等待 LLM 阶段补入默认提问。不会主动唤醒未 @ 机器人的群文件上传。"
+      },
+      "group_file_empty_prompt_fallback_text": {
+        "type": "string",
+        "default": "请分析这个视频文件的内容。",
+        "description": "群文件视频默认提问内容",
+        "hint": "仅在上面的补充开关开启、且当前请求没有文字时使用。"
       },
       "max_download_size_mb": {
         "type": "float",
         "default": 128.0,
         "description": "单个远程视频最大下载体积（MB）",
-        "hint": "填 0 表示不限制。插件会同时检查响应头里的 `content-length` 和实际下载过程。"
+        "hint": "填 0 表示不限制。引用视频和群文件视频共用此限制；插件会同时检查平台上报大小、响应头 content-length 和实际下载过程。"
       },
       "timeout_seconds": {
         "type": "int",

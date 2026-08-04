@@ -1,5 +1,18 @@
 # 更新日志
 
+## 0.4.5 - 2026-08-04
+
+- 新增 AstrBot `File` 组件视频识别，支持 QQ 视频以群文件形式发送的场景
+- 新增 OneBot 原始 `file` 消息段兜底；当组件没有 URL 时，使用 `group_id`、`file_id` 和可选 `busid` 调用 `get_group_file_url`
+- 直接发送与引用消息里的群文件视频均可进入现有抽帧、分段和 STT 流程
+- 新增 `download_policy.group_file_video_enabled` 与 `download_policy.group_file_video_extensions` 中文配置项
+- 新增可配置的群文件视频无文字默认提问，在 `on_waiting_llm_request` 阶段避免 AstrBot 4.25.1 提前跳过已唤醒的纯文件请求
+- 群文件下载复用现有下载体积、超时、处理耗时和临时文件清理策略，普通非视频文件不会被下载
+- 优先复用 AstrBot Core 已下载到 `File.file_` 的本地文件，避免群文件被重复下载
+- 忽略 Core 生成的空或失效文件路径标记，继续使用 OneBot 原始 `file_id` 兜底，避免无效路径占用视频处理配额
+- 调试与警告日志不再打印远程下载 URL 的签名查询参数
+- 修正 `main.py` 注册版本与 `metadata.yaml` 版本不一致的问题
+
 ## 0.4.4 - 2026-05-24
 
 - 默认将插件抽取的关键帧改为临时 `ImageURLPart` 注入，避免关键帧进入会话历史并在下一轮重复携带

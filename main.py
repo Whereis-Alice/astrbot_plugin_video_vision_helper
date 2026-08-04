@@ -22,19 +22,17 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import ImageURLPart, TextPart
-from astrbot.core.message.components import Reply, Video
+from astrbot.core.message.components import File, Reply, Video
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
-
 PLUGIN_ID = "astrbot_plugin_video_vision_helper"
-PLUGIN_VERSION = "0.4.3"
-PLUGIN_DESC = "\u5c06\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u5e76\u63d0\u4f9b\u63d2\u4ef6\u4e34\u65f6\u6587\u4ef6\u6e05\u7406\u7b56\u7565"
+PLUGIN_VERSION = "0.4.5"
+PLUGIN_DESC = "\u5c06\u89c6\u9891\u4e0e QQ \u7fa4\u6587\u4ef6\u89c6\u9891\u62c6\u89e3\u4e3a\u5173\u952e\u5e27\u3001\u53ef\u9009\u97f3\u9891\u4e0e\u8f6c\u5199\u6587\u672c\uff0c\u5e76\u63d0\u4f9b\u957f\u89c6\u9891\u5206\u6bb5\u3001\u4e0b\u8f7d\u4fdd\u62a4\u548c\u4e34\u65f6\u6587\u4ef6\u6e05\u7406"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_video_vision_helper"
 
 DEFAULT_SUMMARY_TEMPLATE = (
@@ -53,6 +51,28 @@ DEFAULT_TRANSCRIPT_SEGMENT_TEMPLATE = "- {segment_label} ({start_seconds:.1f}s-{
 DEFAULT_SKIPPED_VIDEO_TEMPLATE = (
     "[\u89c6\u9891\u5904\u7406\u63d0\u793a][{video_name}] \u8be5\u89c6\u9891\u672a\u88ab\u63d2\u4ef6\u5904\u7406\uff1a{reason}\u3002"
     "{detail}"
+)
+DEFAULT_GROUP_FILE_VIDEO_EXTENSIONS = (
+    ".3g2",
+    ".3gp",
+    ".asf",
+    ".avi",
+    ".flv",
+    ".m2ts",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".mts",
+    ".ogv",
+    ".rm",
+    ".rmvb",
+    ".ts",
+    ".vob",
+    ".webm",
+    ".wmv",
 )
 
 
@@ -129,6 +149,10 @@ class HintPolicy:
 @dataclass(frozen=True)
 class DownloadPolicy:
     quoted_video_download_enabled: bool
+    group_file_video_enabled: bool
+    group_file_video_extensions: tuple[str, ...]
+    group_file_empty_prompt_fallback_enabled: bool
+    group_file_empty_prompt_fallback_text: str
     max_download_size_mb: float
     timeout_seconds: int
 
@@ -334,6 +358,32 @@ class VideoVisionHelper(Star):
     @staticmethod
     def _read_str(value: Any, default: str) -> str:
         return value if isinstance(value, str) and value.strip() else default
+
+    @staticmethod
+    def _read_video_extensions(value: Any) -> tuple[str, ...]:
+        if isinstance(value, str):
+            normalized = value
+            for separator in (",", ";", "|", "\n", "\t"):
+                normalized = normalized.replace(separator, " ")
+            raw_extensions = normalized.split()
+        elif isinstance(value, (list, tuple, set)):
+            raw_extensions = [str(item) for item in value]
+        else:
+            raw_extensions = []
+
+        extensions: list[str] = []
+        seen: set[str] = set()
+        for raw_extension in raw_extensions:
+            extension = raw_extension.strip().lower()
+            if not extension:
+                continue
+            if not extension.startswith("."):
+                extension = f".{extension}"
+            if extension in seen:
+                continue
+            seen.add(extension)
+            extensions.append(extension)
+        return tuple(extensions) or DEFAULT_GROUP_FILE_VIDEO_EXTENSIONS
 
     def _load_settings(self) -> PluginSettings:
         ffmpeg_conf = self._config_section("ffmpeg_policy")
@@ -589,6 +639,21 @@ class VideoVisionHelper(Star):
                     download_conf.get("quoted_video_download_enabled"),
                     True,
                 ),
+                group_file_video_enabled=self._read_bool(
+                    download_conf.get("group_file_video_enabled"),
+                    True,
+                ),
+                group_file_video_extensions=self._read_video_extensions(
+                    download_conf.get("group_file_video_extensions"),
+                ),
+                group_file_empty_prompt_fallback_enabled=self._read_bool(
+                    download_conf.get("group_file_empty_prompt_fallback_enabled"),
+                    True,
+                ),
+                group_file_empty_prompt_fallback_text=self._read_str(
+                    download_conf.get("group_file_empty_prompt_fallback_text"),
+                    "请分析这个视频文件的内容。",
+                ),
                 max_download_size_mb=self._read_float(
                     download_conf.get("max_download_size_mb"),
                     128.0,
@@ -652,7 +717,57 @@ class VideoVisionHelper(Star):
 
     @staticmethod
     def _strip_file_scheme(value: str) -> str:
-        return value[8:] if value.startswith("file:///") else value
+        if not value.startswith("file://"):
+            return value
+        normalized = value[7:]
+        if len(normalized) > 2 and normalized[0] == "/" and normalized[2] == ":":
+            normalized = normalized[1:]
+        return normalized
+
+    @staticmethod
+    def _is_http_url(value: str) -> bool:
+        lowered = value.strip().lower()
+        return lowered.startswith(("http://", "https://"))
+
+    @staticmethod
+    def _redact_url(value: str) -> str:
+        if not VideoVisionHelper._is_http_url(value):
+            return value
+        parsed = urlparse(value)
+        redacted = parsed._replace(query="", fragment="").geturl()
+        return f"{redacted}?<query-redacted>" if parsed.query else redacted
+
+    @classmethod
+    def _redact_mapping_urls(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        redacted = dict(payload)
+        for field_name in ("url", "download_url"):
+            value = redacted.get(field_name)
+            if isinstance(value, str):
+                redacted[field_name] = cls._redact_url(value)
+        return redacted
+
+    @staticmethod
+    def _describe_file_component(file_component: File) -> str:
+        payload: list[str] = []
+        for field_name in ("name", "file_", "path", "url"):
+            value = getattr(file_component, field_name, None)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            if field_name == "url":
+                value = VideoVisionHelper._redact_url(value)
+            payload.append(f"{field_name}={value!r}")
+        return ", ".join(payload) if payload else repr(file_component)
+
+    @staticmethod
+    def _file_component_payload(file_component: File) -> dict[str, Any]:
+        return {
+            "name": getattr(file_component, "name", "") or "",
+            "file_": getattr(file_component, "file_", "") or "",
+            "path": getattr(file_component, "path", "") or "",
+            "url": getattr(file_component, "url", "") or "",
+            "file_size": getattr(file_component, "file_size", None),
+            "size": getattr(file_component, "size", None),
+        }
 
     def _collect_video_path_candidates(self, video: Video) -> list[Path]:
         temp_roots = [
@@ -667,8 +782,7 @@ class VideoVisionHelper(Star):
             if not isinstance(raw_value, str) or not raw_value.strip():
                 continue
             normalized = self._strip_file_scheme(raw_value.strip())
-            lowered = normalized.lower()
-            if lowered.startswith("http://") or lowered.startswith("https://"):
+            if self._is_http_url(normalized):
                 continue
 
             raw_path = Path(normalized)
@@ -728,7 +842,7 @@ class VideoVisionHelper(Star):
         ]
         candidates: list[Path] = []
         seen: set[str] = set()
-        for field_name in ("path", "file", "name", "file_name"):
+        for field_name in ("path", "file", "file_", "name", "file_name"):
             raw_value = payload.get(field_name)
             if not isinstance(raw_value, str) or not raw_value.strip():
                 continue
@@ -765,6 +879,371 @@ class VideoVisionHelper(Star):
                 return Path(parsed.path).name or f"{uuid.uuid4().hex}.mp4"
         return f"{uuid.uuid4().hex}.mp4"
 
+    def _guess_group_file_name_from_mapping(self, payload: dict[str, Any]) -> str:
+        for field_name in ("file_name", "name", "file"):
+            value = payload.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            normalized = value.strip()
+            if self._is_http_url(normalized):
+                normalized = urlparse(normalized).path
+            name = Path(self._strip_file_scheme(normalized)).name
+            if name:
+                return name
+        for field_name in ("url", "download_url"):
+            value = payload.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            name = Path(urlparse(value.strip()).path).name
+            if name:
+                return name
+        return ""
+
+    @staticmethod
+    def _group_file_identity_keys(payload: dict[str, Any]) -> set[str]:
+        keys: set[str] = set()
+        name = VideoVisionHelper._safe_event_get(payload, "file_name", "")
+        if not isinstance(name, str) or not name.strip():
+            name = VideoVisionHelper._safe_event_get(payload, "name", "")
+        if not isinstance(name, str) or not name.strip():
+            name = VideoVisionHelper._safe_event_get(payload, "file", "")
+        if isinstance(name, str) and name.strip() and not VideoVisionHelper._is_http_url(name):
+            keys.add(f"name:{Path(name.strip()).name.casefold()}")
+        for field_name in ("file_id", "id"):
+            value = VideoVisionHelper._safe_event_get(payload, field_name)
+            if value is not None and str(value).strip():
+                keys.add(f"file_id:{str(value).strip()}")
+        for field_name in ("url", "download_url"):
+            value = VideoVisionHelper._safe_event_get(payload, field_name)
+            if isinstance(value, str) and value.strip():
+                keys.add(f"url:{value.strip()}")
+        return keys
+
+    def _is_group_file_video_candidate(
+        self,
+        payload: dict[str, Any],
+        policy: DownloadPolicy,
+    ) -> bool:
+        for field_name in ("mime", "mime_type", "content_type"):
+            value = payload.get(field_name)
+            if isinstance(value, str) and value.strip().lower().startswith("video/"):
+                return True
+
+        candidates: list[str] = []
+        name = self._guess_group_file_name_from_mapping(payload)
+        if name:
+            candidates.append(name)
+        for field_name in ("file_", "path", "url", "download_url"):
+            value = payload.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            normalized = value.strip()
+            if self._is_http_url(normalized):
+                normalized = urlparse(normalized).path
+            candidates.append(self._strip_file_scheme(normalized))
+
+        allowed = set(policy.group_file_video_extensions)
+        return any(Path(candidate).suffix.lower() in allowed for candidate in candidates)
+
+    def _event_has_group_file_video(
+        self,
+        event: AstrMessageEvent,
+        policy: DownloadPolicy,
+    ) -> bool:
+        for component in event.get_messages():
+            if isinstance(component, File):
+                if self._is_group_file_video_candidate(
+                    self._file_component_payload(component),
+                    policy,
+                ):
+                    return True
+                continue
+            if not isinstance(component, Reply) or not component.chain:
+                continue
+            for reply_component in component.chain:
+                if isinstance(reply_component, File) and self._is_group_file_video_candidate(
+                    self._file_component_payload(reply_component),
+                    policy,
+                ):
+                    return True
+
+        raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        for segment in self._extract_onebot_segments(raw_message):
+            if self._safe_event_get(segment, "type", "") != "file":
+                continue
+            payload = self._safe_event_get(segment, "data", {})
+            if isinstance(payload, dict) and self._is_group_file_video_candidate(payload, policy):
+                return True
+
+        raw_file = self._safe_event_get(raw_message, "file", {})
+        return isinstance(raw_file, dict) and self._is_group_file_video_candidate(raw_file, policy)
+
+    @staticmethod
+    def _unwrap_onebot_action_response(response: Any) -> dict[str, Any]:
+        if isinstance(response, dict):
+            nested = response.get("data")
+            return nested if isinstance(nested, dict) else response
+        try:
+            mapped = dict(response)
+        except (TypeError, ValueError):
+            return {}
+        nested = mapped.get("data")
+        return nested if isinstance(nested, dict) else mapped
+
+    @staticmethod
+    def _resolve_onebot_call_action(event: AstrMessageEvent) -> Any:
+        bot = getattr(event, "bot", None)
+        for owner in (bot, getattr(bot, "api", None)):
+            call_action = getattr(owner, "call_action", None)
+            if callable(call_action):
+                return call_action
+        return None
+
+    def _event_group_id(self, event: AstrMessageEvent, payload: dict[str, Any]) -> str:
+        payload_group_id = payload.get("group_id")
+        if payload_group_id is not None and str(payload_group_id).strip():
+            return str(payload_group_id).strip()
+        getter = getattr(event, "get_group_id", None)
+        if callable(getter):
+            try:
+                group_id = getter()
+            except Exception:
+                group_id = ""
+            if group_id is not None and str(group_id).strip():
+                return str(group_id).strip()
+        raw_event = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        raw_group_id = self._safe_event_get(raw_event, "group_id", "")
+        return str(raw_group_id).strip() if raw_group_id is not None else ""
+
+    async def _request_onebot_file_payload(
+        self,
+        event: AstrMessageEvent,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        call_action = self._resolve_onebot_call_action(event)
+        if call_action is None:
+            self._debug("OneBot call_action is unavailable for group file URL fallback")
+            return {}
+
+        file_id = payload.get("file_id") or payload.get("id")
+        if file_id is None or not str(file_id).strip():
+            self._debug("OneBot file segment has no file_id, cannot request a download URL")
+            return {}
+
+        group_id = self._event_group_id(event, payload)
+        normalized_file_id: Any = str(file_id).strip()
+        normalized_group_id: Any = int(group_id) if group_id.isdigit() else group_id
+        busid = payload.get("busid")
+        attempts: list[tuple[str, dict[str, Any]]] = []
+        if group_id:
+            base_params = {
+                "group_id": normalized_group_id,
+                "file_id": normalized_file_id,
+            }
+            if busid is not None and str(busid).strip():
+                attempts.append(("get_group_file_url", {**base_params, "busid": busid}))
+            attempts.append(("get_group_file_url", base_params))
+        else:
+            attempts.append(("get_private_file_url", {"file_id": normalized_file_id}))
+
+        for action, params in attempts:
+            try:
+                response = await call_action(action=action, **params)
+            except Exception as exc:
+                self._debug(
+                    "OneBot %s failed for file_id=%s group_id=%s busid_present=%s: %s",
+                    action,
+                    normalized_file_id,
+                    group_id or "private",
+                    "busid" in params,
+                    exc,
+                )
+                continue
+            unwrapped = self._unwrap_onebot_action_response(response)
+            url = unwrapped.get("url") or unwrapped.get("download_url")
+            if isinstance(url, str) and self._is_http_url(url):
+                self._debug(
+                    "OneBot %s resolved file_id=%s group_id=%s to a remote URL",
+                    action,
+                    normalized_file_id,
+                    group_id or "private",
+                )
+                return unwrapped
+            self._debug(
+                "OneBot %s returned no usable URL for file_id=%s group_id=%s response_keys=%s",
+                action,
+                normalized_file_id,
+                group_id or "private",
+                sorted(unwrapped),
+            )
+        return {}
+
+    async def _resolve_file_video_component(
+        self,
+        event: AstrMessageEvent,
+        file_component: File,
+        *,
+        quoted: bool,
+        download_policy: DownloadPolicy,
+    ) -> ResolvedVideoSegment:
+        payload = self._file_component_payload(file_component)
+        if not self._is_group_file_video_candidate(payload, download_policy):
+            self._debug(
+                "ignored non-video File component: %s",
+                self._describe_file_component(file_component),
+            )
+            return ResolvedVideoSegment()
+
+        name = self._guess_group_file_name_from_mapping(payload) or "video_file"
+        if not download_policy.group_file_video_enabled:
+            return ResolvedVideoSegment(
+                skipped_notice=SkippedVideoNotice(
+                    video_name=name,
+                    reason="文件形式的视频识别已关闭",
+                    detail="请在插件配置中打开“识别以群文件形式发送的视频”。",
+                ),
+            )
+
+        candidates = self._collect_video_path_candidates_from_mapping(payload)
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                resolved = candidate.resolve()
+                self._debug(
+                    "resolved %s File video via local candidate: %s",
+                    "quoted" if quoted else "direct",
+                    resolved,
+                )
+                return ResolvedVideoSegment(
+                    attachment=VideoAttachment(name=name or resolved.name, path=resolved, quoted=quoted),
+                )
+
+        source = self._read_str(payload.get("url"), "")
+        if not source:
+            get_file = getattr(file_component, "get_file", None)
+            if callable(get_file):
+                try:
+                    source = await get_file(allow_return_url=True)
+                except Exception as exc:
+                    self._debug(
+                        "File.get_file failed for %s File video component=%s: %s",
+                        "quoted" if quoted else "direct",
+                        self._describe_file_component(file_component),
+                        exc,
+                    )
+        if source and not self._is_http_url(source):
+            candidate = Path(self._strip_file_scheme(source))
+            if candidate.exists() and candidate.is_file():
+                resolved = candidate.resolve()
+                return ResolvedVideoSegment(
+                    attachment=VideoAttachment(name=name or resolved.name, path=resolved, quoted=quoted),
+                )
+        if source and self._is_http_url(source):
+            declared_size = self._safe_parse_positive_int(getattr(file_component, "file_size", None))
+            if declared_size is None:
+                declared_size = self._safe_parse_positive_int(getattr(file_component, "size", None))
+            downloaded_video = await self._download_video_from_url(
+                event,
+                source,
+                name,
+                download_policy,
+                declared_size_bytes=declared_size,
+            )
+            if downloaded_video.path is not None:
+                return ResolvedVideoSegment(
+                    attachment=VideoAttachment(
+                        name=name or downloaded_video.path.name,
+                        path=downloaded_video.path,
+                        quoted=quoted,
+                    ),
+                )
+            return ResolvedVideoSegment(skipped_notice=downloaded_video.skipped_notice)
+
+        self._debug(
+            "File video component has no local path or remote URL, waiting for raw OneBot fallback: %s",
+            self._describe_file_component(file_component),
+        )
+        return ResolvedVideoSegment()
+
+    async def _resolve_onebot_file_video_segment(
+        self,
+        event: AstrMessageEvent,
+        payload: dict[str, Any],
+        *,
+        quoted: bool,
+        download_policy: DownloadPolicy,
+    ) -> ResolvedVideoSegment:
+        if not self._is_group_file_video_candidate(payload, download_policy):
+            return ResolvedVideoSegment()
+
+        name = self._guess_group_file_name_from_mapping(payload) or "video_file"
+        if not download_policy.group_file_video_enabled:
+            return ResolvedVideoSegment(
+                skipped_notice=SkippedVideoNotice(
+                    video_name=name,
+                    reason="文件形式的视频识别已关闭",
+                    detail="请在插件配置中打开“识别以群文件形式发送的视频”。",
+                ),
+            )
+
+        candidates = self._collect_video_path_candidates_from_mapping(payload)
+        self._debug(
+            "resolving raw OneBot %s file video name=%s file_id_present=%s busid_present=%s candidates=%s",
+            "quoted" if quoted else "direct",
+            name,
+            bool(payload.get("file_id") or payload.get("id")),
+            payload.get("busid") is not None,
+            [str(candidate) for candidate in candidates],
+        )
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                resolved = candidate.resolve()
+                return ResolvedVideoSegment(
+                    attachment=VideoAttachment(name=name or resolved.name, path=resolved, quoted=quoted),
+                )
+
+        resolved_payload = dict(payload)
+        url = self._read_str(payload.get("url") or payload.get("download_url"), "")
+        if not self._is_http_url(url):
+            action_payload = await self._request_onebot_file_payload(event, payload)
+            if action_payload:
+                resolved_payload.update(action_payload)
+                url = self._read_str(
+                    action_payload.get("url") or action_payload.get("download_url"),
+                    "",
+                )
+                action_name = self._guess_group_file_name_from_mapping(action_payload)
+                if action_name:
+                    name = action_name
+
+        if not self._is_http_url(url):
+            return ResolvedVideoSegment(
+                skipped_notice=SkippedVideoNotice(
+                    video_name=name,
+                    reason="无法取得群文件视频的下载地址",
+                    detail="平台提供了视频文件标识，但 OneBot 没有返回可访问的本地路径或远程 URL。",
+                ),
+            )
+
+        declared_size = self._safe_parse_positive_int(
+            resolved_payload.get("file_size") or resolved_payload.get("size"),
+        )
+        downloaded_video = await self._download_video_from_url(
+            event,
+            url,
+            name,
+            download_policy,
+            declared_size_bytes=declared_size,
+        )
+        if downloaded_video.path is None:
+            return ResolvedVideoSegment(skipped_notice=downloaded_video.skipped_notice)
+        return ResolvedVideoSegment(
+            attachment=VideoAttachment(
+                name=name or downloaded_video.path.name,
+                path=downloaded_video.path,
+                quoted=quoted,
+            ),
+        )
+
     async def _download_video_from_url(
         self,
         event: AstrMessageEvent,
@@ -774,28 +1253,19 @@ class VideoVisionHelper(Star):
         *,
         declared_size_bytes: int | None = None,
     ) -> DownloadedVideo:
-        if not policy.quoted_video_download_enabled:
-            self._debug("quoted video remote download is disabled, skipping url=%s", url)
-            return DownloadedVideo(
-                skipped_notice=SkippedVideoNotice(
-                    video_name=suggested_name,
-                    reason="远程视频下载已关闭",
-                    detail="请在插件配置中打开“允许从 quoted video 的远程 URL 下载文件”，或让平台提供本地视频路径。",
-                ),
-            )
-
         parsed = urlparse(url)
+        safe_url = self._redact_url(url)
         suffix = Path(parsed.path).suffix or Path(suggested_name).suffix or ".mp4"
         output_path = self._make_temp_path(suffix)
-        self._debug("downloading quoted video from url=%s to path=%s", url, output_path)
+        self._debug("downloading remote video from url=%s to path=%s", safe_url, output_path)
         max_bytes = int(policy.max_download_size_mb * 1024 * 1024) if policy.max_download_size_mb > 0 else 0
         if max_bytes > 0 and declared_size_bytes is not None and declared_size_bytes > max_bytes:
             logger.warning(
-                "[%s] skipped quoted video download because declared file_size exceeds limit: %s > %s bytes (%s)",
+                "[%s] skipped remote video download because declared file_size exceeds limit: %s > %s bytes (%s)",
                 PLUGIN_ID,
                 declared_size_bytes,
                 max_bytes,
-                url,
+                safe_url,
             )
             return DownloadedVideo(
                 skipped_notice=SkippedVideoNotice(
@@ -819,11 +1289,11 @@ class VideoVisionHelper(Star):
                     raw_content_length = response.headers.get("content-length", "").strip()
                     if max_bytes > 0 and raw_content_length.isdigit() and int(raw_content_length) > max_bytes:
                         logger.warning(
-                            "[%s] skipped quoted video download because content-length exceeds limit: %s > %s bytes (%s)",
+                            "[%s] skipped remote video download because content-length exceeds limit: %s > %s bytes (%s)",
                             PLUGIN_ID,
                             raw_content_length,
                             max_bytes,
-                            url,
+                            safe_url,
                         )
                         return DownloadedVideo(
                             skipped_notice=SkippedVideoNotice(
@@ -844,11 +1314,11 @@ class VideoVisionHelper(Star):
                             downloaded_bytes += len(chunk)
                             if max_bytes > 0 and downloaded_bytes > max_bytes:
                                 logger.warning(
-                                    "[%s] aborted quoted video download because size exceeds limit: %s > %s bytes (%s)",
+                                    "[%s] aborted remote video download because size exceeds limit: %s > %s bytes (%s)",
                                     PLUGIN_ID,
                                     downloaded_bytes,
                                     max_bytes,
-                                    url,
+                                    safe_url,
                                 )
                                 output_path.unlink(missing_ok=True)
                                 return DownloadedVideo(
@@ -863,18 +1333,19 @@ class VideoVisionHelper(Star):
                                 )
                             file_obj.write(chunk)
         except Exception as exc:
-            logger.warning("[%s] failed to download quoted video from %s: %s", PLUGIN_ID, url, exc)
+            safe_error = str(exc).replace(url, safe_url)
+            logger.warning("[%s] failed to download remote video from %s: %s", PLUGIN_ID, safe_url, safe_error)
             output_path.unlink(missing_ok=True)
             return DownloadedVideo(
                 skipped_notice=SkippedVideoNotice(
                     video_name=suggested_name,
                     reason="远程视频下载失败",
-                    detail=f"下载请求未成功：{exc}",
+                    detail=f"下载请求未成功：{safe_error}",
                 ),
             )
         if not output_path.exists() or output_path.stat().st_size <= 0:
             output_path.unlink(missing_ok=True)
-            self._debug("downloaded quoted video is empty: %s", output_path)
+            self._debug("downloaded remote video is empty: %s", output_path)
             return DownloadedVideo(
                 skipped_notice=SkippedVideoNotice(
                     video_name=suggested_name,
@@ -900,7 +1371,7 @@ class VideoVisionHelper(Star):
         self._debug(
             "resolving raw onebot %s video payload=%s candidates=%s",
             "quoted" if quoted else "direct",
-            payload,
+            self._redact_mapping_urls(payload),
             [str(candidate) for candidate in candidates],
         )
 
@@ -912,7 +1383,20 @@ class VideoVisionHelper(Star):
                     attachment=VideoAttachment(name=name or resolved.name, path=resolved, quoted=quoted),
                 )
 
-        if url.startswith("http://") or url.startswith("https://"):
+        if self._is_http_url(url) and not download_policy.quoted_video_download_enabled:
+            self._debug(
+                "quoted video remote download is disabled, skipping url=%s",
+                self._redact_url(url),
+            )
+            return ResolvedVideoSegment(
+                skipped_notice=SkippedVideoNotice(
+                    video_name=name,
+                    reason="远程视频下载已关闭",
+                    detail="请在插件配置中打开“允许从引用视频的远程 URL 下载文件”，或让平台提供本地视频路径。",
+                ),
+            )
+
+        if self._is_http_url(url):
             downloaded_video = await self._download_video_from_url(
                 event,
                 url,
@@ -933,46 +1417,124 @@ class VideoVisionHelper(Star):
 
         return ResolvedVideoSegment()
 
-    async def _collect_aiocqhttp_reply_video_attachments(
+    async def _collect_aiocqhttp_direct_file_video_attachments(
         self,
         event: AstrMessageEvent,
         seen_paths: set[str],
+        handled_file_keys: set[str],
         download_policy: DownloadPolicy,
     ) -> CollectedVideoAttachments:
-        bot = getattr(event, "bot", None)
         raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
-        if bot is None or raw_message is None:
+        if raw_message is None:
+            return CollectedVideoAttachments(attachments=[], skipped_notices=[])
+
+        attachments: list[VideoAttachment] = []
+        skipped_notices: list[SkippedVideoNotice] = []
+        for segment in self._extract_onebot_segments(raw_message):
+            if self._safe_event_get(segment, "type", "") != "file":
+                continue
+            payload = self._safe_event_get(segment, "data", {})
+            if not isinstance(payload, dict):
+                continue
+            identity_keys = self._group_file_identity_keys(payload)
+            if identity_keys and identity_keys.intersection(handled_file_keys):
+                self._debug(
+                    "skipped raw direct file fallback because the File component was already handled: %s",
+                    sorted(identity_keys),
+                )
+                continue
+            resolved = await self._resolve_onebot_file_video_segment(
+                event,
+                payload,
+                quoted=False,
+                download_policy=download_policy,
+            )
+            if resolved.attachment is None and resolved.skipped_notice is None:
+                continue
+            handled_file_keys.update(identity_keys)
+            if resolved.skipped_notice is not None:
+                skipped_notices.append(resolved.skipped_notice)
+            attachment = resolved.attachment
+            if attachment is None:
+                continue
+            key = str(attachment.path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            attachments.append(attachment)
+
+        if attachments:
+            self._debug(
+                "collected %s direct file video attachment(s) from raw OneBot fallback",
+                len(attachments),
+            )
+        return CollectedVideoAttachments(
+            attachments=attachments,
+            skipped_notices=skipped_notices,
+        )
+
+    async def _collect_aiocqhttp_reply_attachments(
+        self,
+        event: AstrMessageEvent,
+        seen_paths: set[str],
+        handled_file_keys: set[str],
+        download_policy: DownloadPolicy,
+        *,
+        include_video_segments: bool = True,
+    ) -> CollectedVideoAttachments:
+        raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        call_action = self._resolve_onebot_call_action(event)
+        if call_action is None or raw_message is None:
             return CollectedVideoAttachments(attachments=[], skipped_notices=[])
 
         reply_ids = self._extract_reply_ids_from_raw_event(raw_message)
         if not reply_ids:
             return CollectedVideoAttachments(attachments=[], skipped_notices=[])
-        self._debug("aiocqhttp raw reply ids for quoted video fallback: %s", reply_ids)
+        self._debug("OneBot raw reply ids for quoted media fallback: %s", reply_ids)
 
         attachments: list[VideoAttachment] = []
         skipped_notices: list[SkippedVideoNotice] = []
         for reply_id in reply_ids:
             try:
-                reply_event_data = await bot.call_action(
+                normalized_reply_id: Any = int(reply_id) if reply_id.isdigit() else reply_id
+                reply_event_data = await call_action(
                     action="get_msg",
-                    message_id=int(reply_id),
+                    message_id=normalized_reply_id,
                 )
             except Exception as exc:
-                self._debug("aiocqhttp get_msg failed for reply id=%s: %s", reply_id, exc)
+                self._debug("OneBot get_msg failed for reply id=%s: %s", reply_id, exc)
                 continue
 
             for segment in self._extract_onebot_segments(reply_event_data):
-                if self._safe_event_get(segment, "type", "") != "video":
-                    continue
+                segment_type = self._safe_event_get(segment, "type", "")
                 payload = self._safe_event_get(segment, "data", {})
                 if not isinstance(payload, dict):
                     continue
-                resolved = await self._resolve_onebot_video_segment(
-                    event,
-                    payload,
-                    quoted=True,
-                    download_policy=download_policy,
-                )
+
+                identity_keys: set[str] = set()
+                if segment_type == "video" and include_video_segments:
+                    resolved = await self._resolve_onebot_video_segment(
+                        event,
+                        payload,
+                        quoted=True,
+                        download_policy=download_policy,
+                    )
+                elif segment_type == "file":
+                    identity_keys = self._group_file_identity_keys(payload)
+                    if identity_keys and identity_keys.intersection(handled_file_keys):
+                        continue
+                    resolved = await self._resolve_onebot_file_video_segment(
+                        event,
+                        payload,
+                        quoted=True,
+                        download_policy=download_policy,
+                    )
+                else:
+                    continue
+
+                if resolved.attachment is None and resolved.skipped_notice is None:
+                    continue
+                handled_file_keys.update(identity_keys)
                 if resolved.skipped_notice is not None:
                     skipped_notices.append(resolved.skipped_notice)
                 attachment = resolved.attachment
@@ -986,12 +1548,12 @@ class VideoVisionHelper(Star):
 
         if attachments:
             self._debug(
-                "collected %s quoted video attachment(s) from aiocqhttp raw reply fallback",
+                "collected %s quoted video/file attachment(s) from OneBot raw reply fallback",
                 len(attachments),
             )
         if skipped_notices:
             self._debug(
-                "collected %s skipped quoted video notice(s) from aiocqhttp raw reply fallback",
+                "collected %s skipped quoted video/file notice(s) from OneBot raw reply fallback",
                 len(skipped_notices),
             )
         return CollectedVideoAttachments(
@@ -1094,9 +1656,51 @@ class VideoVisionHelper(Star):
             )
         return None
 
+    def _parse_file_video_attachment_marker(
+        self,
+        text: str,
+        *,
+        source_part_index: int | None,
+        download_policy: DownloadPolicy,
+    ) -> VideoAttachment | None:
+        if not download_policy.group_file_video_enabled:
+            return None
+        prefixes = (
+            ("[File Attachment: name ", False),
+            ("[File Attachment in quoted message: name ", True),
+        )
+        for prefix, quoted in prefixes:
+            if not text.startswith(prefix) or not text.endswith("]"):
+                continue
+            body = text[len(prefix) : -1]
+            if ", path " not in body:
+                continue
+            name, path_str = body.rsplit(", path ", 1)
+            path_value = path_str.strip()
+            if not path_value:
+                return None
+            payload = {"name": name.strip(), "path": path_value}
+            if not self._is_group_file_video_candidate(payload, download_policy):
+                return None
+            path = Path(self._strip_file_scheme(path_value))
+            if not path.exists() or not path.is_file():
+                self._debug(
+                    "ignored unresolved Core File attachment marker so event fallback can continue: %s",
+                    path,
+                )
+                return None
+            return VideoAttachment(
+                name=name.strip() or path.name,
+                path=path.resolve(),
+                quoted=quoted,
+                source_part_index=source_part_index,
+            )
+        return None
+
     def _collect_video_attachment_markers(
         self,
         req: ProviderRequest,
+        download_policy: DownloadPolicy,
     ) -> list[VideoAttachment]:
         attachments: list[VideoAttachment] = []
         seen_paths: set[str] = set()
@@ -1108,6 +1712,12 @@ class VideoVisionHelper(Star):
                 text,
                 source_part_index=index,
             )
+            if attachment is None:
+                attachment = self._parse_file_video_attachment_marker(
+                    text,
+                    source_part_index=index,
+                    download_policy=download_policy,
+                )
             if not attachment:
                 continue
             key = str(attachment.path)
@@ -1115,22 +1725,26 @@ class VideoVisionHelper(Star):
                 continue
             seen_paths.add(key)
             attachments.append(attachment)
-        self._debug("collected %s video attachment marker(s) from request", len(attachments))
+        self._debug("collected %s video/file attachment marker(s) from request", len(attachments))
         return attachments
 
     async def _collect_video_attachments_from_event(
         self,
         event: AstrMessageEvent,
         settings: PluginSettings,
+        *,
+        initial_attachments: list[VideoAttachment] | None = None,
+        include_video_components: bool = True,
     ) -> CollectedVideoAttachments:
-        attachments: list[VideoAttachment] = []
+        attachments = list(initial_attachments or [])
         skipped_notices: list[SkippedVideoNotice] = []
-        seen_paths: set[str] = set()
+        seen_paths = {str(attachment.path) for attachment in attachments}
+        handled_file_keys: set[str] = set()
         messages = event.get_messages()
         self._debug("falling back to event message chain for video resolution, component_count=%s", len(messages))
 
         for comp in messages:
-            if isinstance(comp, Video):
+            if isinstance(comp, Video) and include_video_components:
                 path = await self._resolve_video_component_path(comp, quoted=False)
                 if path is None:
                     continue
@@ -1142,26 +1756,82 @@ class VideoVisionHelper(Star):
                     )
                 continue
 
-            if isinstance(comp, Reply) and comp.chain:
-                self._debug("inspecting reply chain for quoted video attachments, component_count=%s", len(comp.chain))
-                for reply_comp in comp.chain:
-                    if not isinstance(reply_comp, Video):
-                        continue
-                    path = await self._resolve_video_component_path(reply_comp, quoted=True)
-                    if path is None:
-                        continue
-                    key = str(path)
-                    if key in seen_paths:
-                        continue
-                    seen_paths.add(key)
-                    attachments.append(
-                        VideoAttachment(name=path.name, path=path, quoted=True),
-                    )
+            if isinstance(comp, File):
+                component_payload = self._file_component_payload(comp)
+                identity_keys = self._group_file_identity_keys(component_payload)
+                resolved = await self._resolve_file_video_component(
+                    event,
+                    comp,
+                    quoted=False,
+                    download_policy=settings.download,
+                )
+                if resolved.attachment is None and resolved.skipped_notice is None:
+                    continue
+                handled_file_keys.update(identity_keys)
+                if resolved.skipped_notice is not None:
+                    skipped_notices.append(resolved.skipped_notice)
+                attachment = resolved.attachment
+                if attachment is not None:
+                    key = str(attachment.path)
+                    if key not in seen_paths:
+                        seen_paths.add(key)
+                        attachments.append(attachment)
+                continue
 
-        aiocqhttp_reply_result = await self._collect_aiocqhttp_reply_video_attachments(
+            if isinstance(comp, Reply) and comp.chain:
+                self._debug("inspecting reply chain for quoted video/file attachments, component_count=%s", len(comp.chain))
+                for reply_comp in comp.chain:
+                    if isinstance(reply_comp, Video) and include_video_components:
+                        path = await self._resolve_video_component_path(reply_comp, quoted=True)
+                        if path is None:
+                            continue
+                        key = str(path)
+                        if key in seen_paths:
+                            continue
+                        seen_paths.add(key)
+                        attachments.append(
+                            VideoAttachment(name=path.name, path=path, quoted=True),
+                        )
+                        continue
+
+                    if not isinstance(reply_comp, File):
+                        continue
+                    component_payload = self._file_component_payload(reply_comp)
+                    identity_keys = self._group_file_identity_keys(component_payload)
+                    resolved = await self._resolve_file_video_component(
+                        event,
+                        reply_comp,
+                        quoted=True,
+                        download_policy=settings.download,
+                    )
+                    if resolved.attachment is None and resolved.skipped_notice is None:
+                        continue
+                    handled_file_keys.update(identity_keys)
+                    if resolved.skipped_notice is not None:
+                        skipped_notices.append(resolved.skipped_notice)
+                    attachment = resolved.attachment
+                    if attachment is None:
+                        continue
+                    key = str(attachment.path)
+                    if key not in seen_paths:
+                        seen_paths.add(key)
+                        attachments.append(attachment)
+
+        direct_file_result = await self._collect_aiocqhttp_direct_file_video_attachments(
             event,
             seen_paths,
+            handled_file_keys,
             settings.download,
+        )
+        attachments.extend(direct_file_result.attachments)
+        skipped_notices.extend(direct_file_result.skipped_notices)
+
+        aiocqhttp_reply_result = await self._collect_aiocqhttp_reply_attachments(
+            event,
+            seen_paths,
+            handled_file_keys,
+            settings.download,
+            include_video_segments=include_video_components,
         )
         attachments.extend(aiocqhttp_reply_result.attachments)
         skipped_notices.extend(aiocqhttp_reply_result.skipped_notices)
@@ -1177,10 +1847,15 @@ class VideoVisionHelper(Star):
         req: ProviderRequest,
         settings: PluginSettings,
     ) -> CollectedVideoAttachments:
-        attachments = self._collect_video_attachment_markers(req)
+        attachments = self._collect_video_attachment_markers(req, settings.download)
         if attachments:
-            self._debug("using request markers as the video attachment source")
-            return CollectedVideoAttachments(attachments=attachments, skipped_notices=[])
+            self._debug("using request markers for native videos and checking the event for file videos")
+            return await self._collect_video_attachments_from_event(
+                event,
+                settings,
+                initial_attachments=attachments,
+                include_video_components=False,
+            )
         self._debug("no video markers were injected by core, falling back to event parsing")
         return await self._collect_video_attachments_from_event(event, settings)
 
@@ -2729,6 +3404,30 @@ class VideoVisionHelper(Star):
             coverage_seconds=sum(covered_segments.values()),
         )
 
+    @filter.on_waiting_llm_request()
+    async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+        settings = self._load_settings()
+        if not settings.enabled or not settings.download.group_file_video_enabled:
+            return
+        if not settings.frame.enabled and settings.audio.mode == "disabled":
+            return
+        if event.message_str and event.message_str.strip():
+            return
+        if not settings.download.group_file_empty_prompt_fallback_enabled:
+            return
+        if not self._event_has_group_file_video(event, settings.download):
+            return
+
+        fallback_text = settings.download.group_file_empty_prompt_fallback_text
+        event.message_str = fallback_text
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj is not None and hasattr(message_obj, "message_str"):
+            message_obj.message_str = fallback_text
+        self._debug(
+            "added empty-prompt fallback for a file video message: %s",
+            fallback_text,
+        )
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         settings = self._load_settings()
@@ -2741,12 +3440,13 @@ class VideoVisionHelper(Star):
             return
 
         self._debug(
-            "handling llm request with frame_enabled=%s audio_mode=%s stt_backend=%s hint_target=%s segment_enabled=%s download_limit_mb=%.2f processing_limit_s=%s",
+            "handling llm request with frame_enabled=%s audio_mode=%s stt_backend=%s hint_target=%s segment_enabled=%s group_file_video_enabled=%s download_limit_mb=%.2f processing_limit_s=%s",
             settings.frame.enabled,
             settings.audio.mode,
             settings.stt.backend,
             settings.hint.target,
             settings.segment.enabled,
+            settings.download.group_file_video_enabled,
             settings.download.max_download_size_mb,
             settings.runtime.max_processing_seconds_per_video or "disabled",
         )

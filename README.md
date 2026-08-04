@@ -10,7 +10,7 @@
 
 ## 工作方式
 
-AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把视频附件转换成包含本地路径的提示文本。本插件会在 `on_llm_request` 阶段接管这些视频路径，然后自动执行下面的流程：
+AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把普通视频附件转换成包含本地路径的提示文本。对于以 QQ 群文件发送的视频，插件会额外读取事件中的官方 `File` 组件；必要时再从 OneBot 原始消息取得下载地址。本插件会在 `on_llm_request` 阶段统一接管这些视频，然后自动执行下面的流程：
 
 1. 用 `ffprobe` 探测视频流和音频流
 2. 按策略决定是否分段处理长视频
@@ -21,7 +21,8 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 
 ## 功能特性
 
-- 支持普通视频附件和引用消息里的视频附件
+- 支持普通视频附件、QQ 群文件视频，以及引用消息里的两类视频
+- 支持 AstrBot 官方 `File` 组件，并可通过 OneBot `get_group_file_url` 解析只有 `file_id` / `busid` 的群文件
 - 支持 `uniform` / `fixed_interval` / `head_tail` 三种抽帧策略
 - 支持长视频分段，可在总预算内对整段视频做均匀取段或头尾取段
 - 支持 `disabled` / `attach` / `stt` / `attach_and_stt` 四种音频模式
@@ -41,6 +42,26 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 - 支持插件自己的 `cleanup_policy`，可兜底清理过期的插件临时文件
 - 支持把说明提示注入到 `extra_user_content`、`prompt` 或 `system_prompt`
 - 成功处理后可移除 AstrBot Core 注入的原始视频路径提示
+
+## QQ 群文件视频
+
+从 `0.4.5` 开始，视频即使以“群文件”而不是普通“视频消息”发送，也可以进入抽帧和 STT 流程。插件按以下顺序解析：
+
+1. 读取 AstrBot 事件链中的 `File` 组件及其本地路径或 URL
+2. 如果组件没有可用地址，从 OneBot 原始 `file` 消息段读取 `file_id`、`busid` 和 `group_id`
+3. 调用 `get_group_file_url` 获取下载地址
+4. 在下载体积和超时限制内下载到插件临时目录，再执行正常的视频处理
+
+默认只把常见视频扩展名当作视频文件，普通压缩包、文档和其它群文件不会被插件下载。相关中文配置位于“远程视频与群文件下载策略”：
+
+- `识别以群文件形式发送的视频`：默认开启
+- `按文件识别的视频扩展名`：可用逗号、空格或分号分隔
+- `群文件视频无文字时补充默认提问`：默认开启，防止已唤醒的纯文件请求在进入插件前被 Core 跳过
+- `群文件视频默认提问内容`：默认是“请分析这个视频文件的内容。”
+- `单个远程视频最大下载体积（MB）`：群文件视频与引用视频共用
+- `远程视频下载超时（秒）`：群文件视频与引用视频共用
+
+群文件消息仍需按 AstrBot 当前触发规则唤醒机器人，例如引用该群文件后 @ 机器人或附带唤醒词。对于“已经唤醒、但没有其它文字”的群文件视频请求，插件会在 `on_waiting_llm_request` 阶段补入默认提问，避免 AstrBot 4.25.1 在 `on_llm_request` 之前提前结束。插件不会主动响应群里所有未唤醒的文件上传通知。
 
 ## 依赖
 
@@ -185,6 +206,7 @@ AstrBot 当前的 `ProviderRequest` 没有 `video_urls` 字段，但 Core 会把
 
 - 视频附件是从 Core 注入 marker 还是从事件链 fallback 收集到的
 - quoted video 的 `file` / `path` / 候选本地路径
+- 群文件的 `File` 组件识别结果、`file_id` / `busid` 是否存在，以及 OneBot 文件 URL 解析结果
 - FFprobe 识别结果、抽帧时间点、音频提取结果
 - AstrBot STT provider 的选路结果
 - 可选输出 STT 转写文本预览
@@ -243,7 +265,7 @@ Error processing quoted video attachment: not a valid file: 8703a2ebfa5f99dd29ce
 - `audio_policy`：音频模式、采样率、音频 / STT 总分析时长、STT 失败时是否回退为仅附带音频
 - `stt_policy`：STT 后端选择、AstrBot provider 绑定、自定义转写接口、语言、单段转写长度、整条视频总转写长度限制和可选转写预览日志
 - `hint_policy`：说明提示的注入位置，以及总览 / 单视频 / 分段转写 / 跳过视频模板
-- `download_policy`：quoted video 远程下载开关、下载体积限制和超时
+- `download_policy`：引用视频下载开关、群文件视频识别、视频扩展名、无文字默认提问、下载体积限制和超时
 - `runtime_policy`：单视频总处理时长限制
 - `cleanup_policy`：插件临时文件兜底清理开关、保留时长、清理间隔和单次清理数量
 
@@ -256,6 +278,7 @@ Error processing quoted video attachment: not a valid file: 8703a2ebfa5f99dd29ce
 - 转写文本会按 `max_transcript_chars` 和 `max_total_transcript_chars` 双重限制，防止提示过长
 - `cleanup_policy` 只清理本插件生成的过期临时文件，不负责清理 AstrBot Core、平台适配器或其它插件的缓存
 - 如果平台适配器对引用视频只返回裸文件名而没有真实路径，AstrBot Core 仍可能先打印一条错误日志
+- 群文件上传本身必须进入 AstrBot 的消息处理流程并触发 LLM 请求；只有 OneBot `group_upload` 通知、但没有消息请求时，`on_llm_request` 插件无法单独启动一次模型调用
 
 ## 更新日志
 
